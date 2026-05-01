@@ -109,6 +109,7 @@ let
           "--verbose"
           "--resilient"
           "--recover"
+          "--resync-on-new-path"
           "--create-empty-src-dirs"
           "--max-lock" "5m"
         ];

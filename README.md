@@ -83,6 +83,7 @@ in
           "--verbose"
           "--resilient"
           "--recover"
+          "--resync-on-new-path"
           "--create-empty-src-dirs"
           "--max-lock" "5m"
           "--checksum"
@@ -192,7 +193,7 @@ When pandoc is enabled:
 
 Default `extraArgs`:
 ```nix
-[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" ]
+[ "--verbose" "--resilient" "--recover" "--resync-on-new-path" "--create-empty-src-dirs" "--max-lock" "5m" ]
 ```
 
 ## How FUSE mounts work
