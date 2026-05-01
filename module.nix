@@ -109,7 +109,6 @@ let
           "--verbose"
           "--resilient"
           "--recover"
-          "--resync-on-new-path"
           "--create-empty-src-dirs"
           "--max-lock" "5m"
         ];
@@ -258,6 +257,37 @@ let
 
   # ── Builders ──────────────────────────────────────────────────────────
 
+  # Derive the listing filename rclone bisync uses under ~/.cache/rclone/bisync/
+  bisyncListingPath = s:
+    let
+      path1Safe = builtins.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" s.localPath);
+      path2Safe = builtins.replaceStrings [ ":" "/" ] [ "_" "_" ] s.remote;
+    in
+    "%h/.cache/rclone/bisync/${path1Safe}..${path2Safe}.path1.lst";
+
+  mkBisyncInitService = name: s: nameValuePair "rclone-bisync-${name}-init" {
+    description = "Initial resync for rclone bisync ${name}";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "rclone-bisync-${name}.service" ];
+    before = [ "rclone-bisync-${name}.service" ];
+    unitConfig.ConditionPathExists = "!${bisyncListingPath s}";
+    serviceConfig = {
+      Type = "oneshot";
+      User = s.user;
+      Group = s.group;
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${s.localPath}";
+      ExecStart = concatStringsSep " " ([
+        "${getExe pkgs.rclone}"
+        "bisync"
+        s.localPath
+        s.remote
+        "--resync"
+      ] ++ (optional (s.configFile != null) "--config=${s.configFile}")
+        ++ s.extraArgs);
+    };
+  };
+
   mkFilesystem = _name: m: {
     device = m.remote;
     mountPoint = m.localPath;
@@ -393,6 +423,7 @@ in
 
     systemd.services =
       listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
+      // listToAttrs (mapAttrsToList mkBisyncInitService cfg.bisyncs)
       // optionalAttrs (cfg.enableMountReset && cfg.mounts != { }) {
         rclone-mount-reset = {
           description = "Reset failed rclone mounts after resume";
