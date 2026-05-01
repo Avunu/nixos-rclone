@@ -25,9 +25,9 @@ let
         description = "Absolute local path to mount into.";
       };
       configFile = mkOption {
-        type = types.str;
+        type = types.nullOr types.str;
         default = cfg.defaultConfigFile;
-        description = "Path to the rclone config file.";
+        description = "Path to the rclone config file. Defaults to rclone's default (~/.config/rclone/rclone.conf) when null.";
       };
       uid = mkOption {
         type = types.int;
@@ -74,9 +74,9 @@ let
         description = "Absolute local directory to sync.";
       };
       configFile = mkOption {
-        type = types.str;
+        type = types.nullOr types.str;
         default = cfg.defaultConfigFile;
-        description = "Path to the rclone config file.";
+        description = "Path to the rclone config file. Defaults to rclone's default (~/.config/rclone/rclone.conf) when null.";
       };
       user = mkOption {
         type = types.str;
@@ -262,8 +262,9 @@ let
     mountPoint = m.localPath;
     fsType = "rclone";
     noCheck = true;
-    options = baseMountOpts ++ [
-      "config=${m.configFile}"
+    options = baseMountOpts
+      ++ (optional (m.configFile != null) "config=${m.configFile}")
+      ++ [
       "uid=${toString m.uid}"
       "gid=${toString m.gid}"
       "umask=022"
@@ -286,8 +287,8 @@ let
         "bisync"
         s.localPath
         s.remote
-        "--config=${s.configFile}"
-      ] ++ s.extraArgs);
+      ] ++ (optional (s.configFile != null) "--config=${s.configFile}")
+        ++ s.extraArgs);
       Restart = "on-failure";
       RestartSec = "60s";
     }
@@ -322,9 +323,9 @@ in
 
     # ── Global defaults ─────────────────────────────────────────────────
     defaultConfigFile = mkOption {
-      type = types.str;
-      default = "/etc/rclone.conf";
-      description = "Default rclone config file when a remote doesn't specify one.";
+      type = types.nullOr types.str;
+      default = null;
+      description = "Default rclone config file when a remote doesn't specify one. Null means use rclone's default (~/.config/rclone/rclone.conf).";
     };
 
     defaultUser = mkOption {

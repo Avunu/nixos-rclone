@@ -149,7 +149,7 @@ When pandoc is enabled:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enable` | bool | `false` | Enable the module |
-| `defaultConfigFile` | string | `"/etc/rclone.conf"` | Default rclone config path |
+| `defaultConfigFile` | string or null | `null` | Default rclone config path (`null` = use rclone's default `~/.config/rclone/rclone.conf`) |
 | `defaultUser` | string | `"root"` | Default user for mounts/syncs |
 | `defaultGroup` | string | `"users"` | Default group |
 | `defaultUid` | int | `1000` | Default UID for FUSE mounts |
@@ -163,7 +163,7 @@ When pandoc is enabled:
 |--------|------|---------|-------------|
 | `remote` | string | — | Rclone remote path (e.g. `myremote:path`) |
 | `localPath` | string | — | Local mount point |
-| `configFile` | string | global default | Rclone config file path |
+| `configFile` | string or null | global default | Rclone config file path (`null` = rclone's default) |
 | `uid` | int | global default | UID for the FUSE mount |
 | `gid` | int | global default | GID for the FUSE mount |
 | `user` | string | global default | Owner for tmpfiles rule |
@@ -177,7 +177,7 @@ When pandoc is enabled:
 |--------|------|---------|-------------|
 | `remote` | string | — | Rclone remote path |
 | `localPath` | string | — | Local directory to sync |
-| `configFile` | string | global default | Rclone config file path |
+| `configFile` | string or null | global default | Rclone config file path (`null` = rclone's default) |
 | `user` | string | global default | User to run sync as |
 | `group` | string | global default | Group for service |
 | `dirPerms` | string | `"0755"` | Directory permissions |
