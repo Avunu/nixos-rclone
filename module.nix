@@ -205,7 +205,11 @@ let
 
         if [ ! -f "$docxfile" ] || [ "$mdfile" -nt "$docxfile" ]; then
           mkdir -p "$(dirname "$docxfile")"
-          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/strip-heading-ids.hs -o "$docxfile" ${mdToDocxArgs}
+          ref_arg=""
+          if [ -f "$docxfile" ]; then
+            ref_arg="--reference-doc=$docxfile"
+          fi
+          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/strip-heading-ids.hs $ref_arg -o "$docxfile" ${mdToDocxArgs}
           touch -r "$mdfile" "$docxfile"
         fi
       done
