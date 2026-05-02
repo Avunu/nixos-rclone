@@ -292,20 +292,28 @@ let
     };
   };
 
-  mkFilesystem = _name: m: {
-    device = m.remote;
-    mountPoint = m.localPath;
-    fsType = "rclone";
-    noCheck = true;
-    options = baseMountOpts
-      ++ (optional (m.configFile != null) "config=${m.configFile}")
-      ++ [
-      "uid=${toString m.uid}"
-      "gid=${toString m.gid}"
-      "umask=022"
-    ] ++ m.extraOpts;
-    neededForBoot = false;
-  };
+  mkFilesystem = _name: m:
+    let
+      effectiveConfig =
+        if m.configFile != null then m.configFile
+        else let
+          userCfg = config.users.users.${m.user} or {};
+          userHome = userCfg.home or "/home/${m.user}";
+        in "${userHome}/.config/rclone/rclone.conf";
+    in {
+      device = m.remote;
+      mountPoint = m.localPath;
+      fsType = "rclone";
+      noCheck = true;
+      options = baseMountOpts
+        ++ [ "config=${effectiveConfig}" ]
+        ++ [
+        "uid=${toString m.uid}"
+        "gid=${toString m.gid}"
+        "umask=022"
+      ] ++ m.extraOpts;
+      neededForBoot = false;
+    };
 
   mkBisyncService = name: s: nameValuePair "rclone-bisync-${name}" {
     description = "Rclone bisync for ${name}";
