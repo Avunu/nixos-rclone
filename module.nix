@@ -199,9 +199,12 @@ let
       set -euo pipefail
       shopt -s globstar nullglob
 
-      for mdfile in "${mdDir}"/**/*.md; do
-        relpath="''${mdfile#${mdDir}/}"
-        docxfile="${docxDir}/''${relpath%.md}.docx"
+      md_dir=${escapeShellArg mdDir}
+      docx_dir=${escapeShellArg docxDir}
+
+      for mdfile in "$md_dir"/**/*.md; do
+        relpath="''${mdfile#"$md_dir"/}"
+        docxfile="$docx_dir/''${relpath%.md}.docx"
 
         if [ ! -f "$docxfile" ] || [ "$mdfile" -nt "$docxfile" ]; then
           mkdir -p "$(dirname "$docxfile")"
@@ -215,9 +218,9 @@ let
       done
 
       ${optionalString syncConfig.pandoc.syncDeletions ''
-        for docxfile in "${docxDir}"/**/*.docx; do
-          relpath="''${docxfile#${docxDir}/}"
-          mdfile="${mdDir}/''${relpath%.docx}.md"
+        for docxfile in "$docx_dir"/**/*.docx; do
+          relpath="''${docxfile#"$docx_dir"/}"
+          mdfile="$md_dir/''${relpath%.docx}.md"
           if [ ! -f "$mdfile" ]; then
             rm "$docxfile"
           fi
@@ -237,9 +240,12 @@ let
       set -euo pipefail
       shopt -s globstar nullglob
 
-      for docxfile in "${docxDir}"/**/*.docx; do
-        relpath="''${docxfile#${docxDir}/}"
-        mdfile="${mdDir}/''${relpath%.docx}.md"
+      md_dir=${escapeShellArg mdDir}
+      docx_dir=${escapeShellArg docxDir}
+
+      for docxfile in "$docx_dir"/**/*.docx; do
+        relpath="''${docxfile#"$docx_dir"/}"
+        mdfile="$md_dir/''${relpath%.docx}.md"
 
         if [ ! -f "$mdfile" ] || [ "$docxfile" -nt "$mdfile" ]; then
           mkdir -p "$(dirname "$mdfile")"
@@ -249,9 +255,9 @@ let
       done
 
       ${optionalString syncConfig.pandoc.syncDeletions ''
-        for mdfile in "${mdDir}"/**/*.md; do
-          relpath="''${mdfile#${mdDir}/}"
-          docxfile="${docxDir}/''${relpath%.md}.docx"
+        for mdfile in "$md_dir"/**/*.md; do
+          relpath="''${mdfile#"$md_dir"/}"
+          docxfile="$docx_dir/''${relpath%.md}.docx"
           if [ ! -f "$docxfile" ]; then
             rm "$mdfile"
           fi
@@ -264,8 +270,8 @@ let
   # Derive the listing filename rclone bisync uses under ~/.cache/rclone/bisync/
   bisyncListingPath = s:
     let
-      path1Safe = builtins.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" s.localPath);
-      path2Safe = builtins.replaceStrings [ ":" "/" ] [ "_" "_" ] s.remote;
+      path1Safe = builtins.replaceStrings [ "/" " " ] [ "_" "_" ] (lib.removePrefix "/" s.localPath);
+      path2Safe = builtins.replaceStrings [ ":" "/" " " ] [ "_" "_" "_" ] s.remote;
     in
     "%h/.cache/rclone/bisync/${path1Safe}..${path2Safe}.path1.lst";
 
@@ -280,14 +286,14 @@ let
       Type = "oneshot";
       User = s.user;
       Group = s.group;
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${s.localPath}";
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
       ExecStart = concatStringsSep " " ([
         "${getExe pkgs.rclone}"
         "bisync"
-        s.localPath
-        s.remote
+        (escapeShellArg s.localPath)
+        (escapeShellArg s.remote)
         "--resync"
-      ] ++ (optional (s.configFile != null) "--config=${s.configFile}")
+      ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
         ++ s.extraArgs);
     };
   };
@@ -324,20 +330,20 @@ let
       Type = "oneshot";
       User = s.user;
       Group = s.group;
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${s.localPath}";
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
       ExecStart = concatStringsSep " " ([
         "${getExe pkgs.rclone}"
         "bisync"
-        s.localPath
-        s.remote
-      ] ++ (optional (s.configFile != null) "--config=${s.configFile}")
+        (escapeShellArg s.localPath)
+        (escapeShellArg s.remote)
+      ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
         ++ s.extraArgs);
       Restart = "on-failure";
       RestartSec = "60s";
     }
     // optionalAttrs s.pandoc.enable {
       ExecStartPre = [
-        "${pkgs.coreutils}/bin/mkdir -p ${s.localPath}"
+        "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
         "${mkPandocPreSync name s}"
       ];
       ExecStartPost = "${mkPandocPostSync name s}";
@@ -356,7 +362,7 @@ let
   };
 
   mkTmpfile = _name: r:
-    "d ${r.localPath} ${r.dirPerms} ${r.user} ${r.group} -";
+    "d '${r.localPath}' ${r.dirPerms} ${r.user} ${r.group} -";
 
 in
 {
