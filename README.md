@@ -109,7 +109,7 @@ in
 }
 ```
 
-## Pandoc integration (Obsidian ↔ Google Drive)
+## Markdown sync (Obsidian ↔ Google Drive)
 
 Bisync pairs can optionally convert between markdown and docx before/after each sync. This is useful for editing Obsidian vault files as Google Docs:
 
@@ -126,9 +126,9 @@ services.rclone-remotes.bisyncs.obsidian = {
     rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # optional
   };
 
-  pandoc = {
+  markdownSync = {
     enable = true;
-    markdownPath = "/home/user/ObsidianVault";
+    path = "/home/user/ObsidianVault";
     syncDeletions = true;
     mdToDocxArgs = [ "--reference-doc=/home/user/template.docx" ];
     docxToMdArgs = [ "--wrap=none" "--extract-media=./media" ];
@@ -136,11 +136,13 @@ services.rclone-remotes.bisyncs.obsidian = {
 };
 ```
 
-When pandoc is enabled:
+When markdown sync is enabled:
 
-1. **Pre-sync**: Newer markdown files in `markdownPath` are converted to docx (applying the `strip-heading-ids` filter) and placed in `localPath`
+1. **Pre-sync**: Newer markdown files in `path` are converted to docx and placed in `localPath`
 2. **Rclone bisync** runs between `localPath` and the remote
-3. **Post-sync**: Newer docx files from the remote are converted back to markdown (applying the `compact-lists` filter) in `markdownPath`
+3. **Post-sync**: Newer docx files from the remote are converted back to markdown in `path`
+
+The optional args are passed through to the Pandoc CLI, which facilitates the conversion process.
 
 ## Google Drive integration
 
@@ -211,11 +213,11 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
 | `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
-| `pandoc.enable` | bool | `false` | Enable md↔docx conversion |
-| `pandoc.markdownPath` | string | — | Markdown/vault directory |
-| `pandoc.syncDeletions` | bool | `false` | Propagate deletions |
-| `pandoc.mdToDocxArgs` | list of strings | `[]` | Extra pandoc args (md→docx) |
-| `pandoc.docxToMdArgs` | list of strings | `["--wrap=none"]` | Extra pandoc args (docx→md) |
+| `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
+| `markdownSync.path` | string | — | Markdown/vault directory |
+| `markdownSync.syncDeletions` | bool | `false` | Propagate deletions |
+| `markdownSync.mdToDocxArgs` | list of strings | `[]` | Extra args (md→docx) |
+| `markdownSync.docxToMdArgs` | list of strings | `["--wrap=none"]` | Extra args (docx→md) |
 
 Default `extraArgs`:
 ```nix

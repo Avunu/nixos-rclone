@@ -140,10 +140,10 @@ let
         };
       };
 
-      pandoc = {
-        enable = mkEnableOption "bidirectional pandoc markdown/docx conversion";
+      markdownSync = {
+        enable = mkEnableOption "bidirectional markdown/docx sync";
 
-        markdownPath = mkOption {
+        path = mkOption {
           type = types.nullOr types.str;
           default = null;
           description = ''
@@ -163,14 +163,14 @@ let
         mdToDocxArgs = mkOption {
           type = types.listOf types.str;
           default = [ ];
-          description = "Extra pandoc arguments for markdown to docx conversion.";
+          description = "Extra arguments for markdown to docx conversion.";
           example = [ "--reference-doc=/path/to/template.docx" ];
         };
 
         docxToMdArgs = mkOption {
           type = types.listOf types.str;
           default = [ "--wrap=none" ];
-          description = "Extra pandoc arguments for docx to markdown conversion.";
+          description = "Extra arguments for docx to markdown conversion.";
         };
       };
     };
@@ -208,19 +208,19 @@ let
     "vfs-write-back=5s"
   ];
 
-  # ── Pandoc helpers ────────────────────────────────────────────────────
+  # ── Markdown sync helpers ─────────────────────────────────────────────
 
   haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
 
-  mkPandocPreSync =
+  mkMarkdownPreSync =
     name: syncConfig:
     let
-      mdDir = syncConfig.pandoc.markdownPath;
+      mdDir = syncConfig.markdownSync.path;
       docxDir = syncConfig.localPath;
       pandocBin = "${pkgs.pandoc}/bin/pandoc";
-      mdToDocxArgs = escapeShellArgs syncConfig.pandoc.mdToDocxArgs;
+      mdToDocxArgs = escapeShellArgs syncConfig.markdownSync.mdToDocxArgs;
     in
-    pkgs.writeShellScript "pandoc-pre-sync-${name}" ''
+    pkgs.writeShellScript "markdown-pre-sync-${name}" ''
       set -euo pipefail
       shopt -s globstar nullglob
 
@@ -242,7 +242,7 @@ let
         fi
       done
 
-      ${optionalString syncConfig.pandoc.syncDeletions ''
+      ${optionalString syncConfig.markdownSync.syncDeletions ''
         for docxfile in "$docx_dir"/**/*.docx; do
           relpath="''${docxfile#"$docx_dir"/}"
           mdfile="$md_dir/''${relpath%.docx}.md"
@@ -253,15 +253,15 @@ let
       ''}
     '';
 
-  mkPandocPostSync =
+  mkMarkdownPostSync =
     name: syncConfig:
     let
-      mdDir = syncConfig.pandoc.markdownPath;
+      mdDir = syncConfig.markdownSync.path;
       docxDir = syncConfig.localPath;
       pandocBin = "${pkgs.pandoc}/bin/pandoc";
-      docxToMdArgs = escapeShellArgs syncConfig.pandoc.docxToMdArgs;
+      docxToMdArgs = escapeShellArgs syncConfig.markdownSync.docxToMdArgs;
     in
-    pkgs.writeShellScript "pandoc-post-sync-${name}" ''
+    pkgs.writeShellScript "markdown-post-sync-${name}" ''
       set -euo pipefail
       shopt -s globstar nullglob
 
@@ -279,7 +279,7 @@ let
         fi
       done
 
-      ${optionalString syncConfig.pandoc.syncDeletions ''
+      ${optionalString syncConfig.markdownSync.syncDeletions ''
         for mdfile in "$md_dir"/**/*.md; do
           relpath="''${mdfile#"$md_dir"/}"
           docxfile="$docx_dir/''${relpath%.md}.docx"
@@ -362,7 +362,7 @@ let
     description = "Rclone bisync for ${name}";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
-    path = optionals s.pandoc.enable [ haskellEnv ];
+    path = optionals s.markdownSync.enable [ haskellEnv ];
     serviceConfig = {
       Type = "oneshot";
       User = s.user;
@@ -379,12 +379,12 @@ let
       Restart = "on-failure";
       RestartSec = "60s";
     }
-    // optionalAttrs s.pandoc.enable {
+    // optionalAttrs s.markdownSync.enable {
       ExecStartPre = [
         "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
-        "${mkPandocPreSync name s}"
+        "${mkMarkdownPreSync name s}"
       ];
-      ExecStartPost = "${mkPandocPostSync name s}";
+      ExecStartPost = "${mkMarkdownPostSync name s}";
     };
   };
 
@@ -469,8 +469,8 @@ in
   config = mkIf cfg.enable {
 
     assertions = mapAttrsToList (name: s: {
-      assertion = s.pandoc.enable -> s.pandoc.markdownPath != null;
-      message = "services.rclone-remotes.bisyncs.${name}.pandoc.markdownPath must be set when pandoc is enabled";
+      assertion = s.markdownSync.enable -> s.markdownSync.path != null;
+      message = "services.rclone-remotes.bisyncs.${name}.markdownSync.path must be set when markdownSync is enabled";
     }) cfg.bisyncs;
 
     environment.systemPackages = [ pkgs.rclone ];
