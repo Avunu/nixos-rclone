@@ -111,8 +111,33 @@ let
           "--recover"
           "--create-empty-src-dirs"
           "--max-lock" "5m"
+          "--conflict-resolve" "newer"
+          "--compare" "size,modtime,checksum"
         ];
         description = "Extra arguments passed to `rclone bisync`.";
+      };
+
+      googleDrive = {
+        enable = mkEnableOption "Google Drive-specific bisync options";
+
+        rootFolderId = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "Restrict sync to a specific Google Drive folder ID.";
+          example = "14zaHa9I5dpMa4AaUTt_Mi7r2_AyT6654";
+        };
+
+        exportFormats = mkOption {
+          type = types.str;
+          default = "docx";
+          description = "Comma-separated list of formats to export Google Docs as.";
+        };
+
+        importFormats = mkOption {
+          type = types.str;
+          default = "docx";
+          description = "Comma-separated list of formats to import into Google Docs.";
+        };
       };
 
       pandoc = {
@@ -267,6 +292,16 @@ let
 
   # ── Builders ──────────────────────────────────────────────────────────
 
+  mkGDriveArgs = s: optionals s.googleDrive.enable (
+    [
+      "--drive-export-formats" s.googleDrive.exportFormats
+      "--drive-import-formats" s.googleDrive.importFormats
+      "--fix-case"
+      "--slow-hash-sync-only"
+    ] ++ optional (s.googleDrive.rootFolderId != null)
+        "--drive-root-folder-id=${s.googleDrive.rootFolderId}"
+  );
+
   # Derive the listing filename rclone bisync uses under ~/.cache/rclone/bisync/
   bisyncListingPath = s:
     let
@@ -293,7 +328,9 @@ let
         (escapeShellArg s.localPath)
         (escapeShellArg s.remote)
         "--resync"
+        "--resync-mode" "newer"
       ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
+        ++ mkGDriveArgs s
         ++ s.extraArgs);
     };
   };
@@ -337,6 +374,7 @@ let
         (escapeShellArg s.localPath)
         (escapeShellArg s.remote)
       ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
+        ++ mkGDriveArgs s
         ++ s.extraArgs);
       Restart = "on-failure";
       RestartSec = "60s";

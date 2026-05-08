@@ -94,6 +94,12 @@ in
         localPath = "${home}/.local/share/fonts";
         interval = "1h";
       };
+      gdocs = {
+        remote = "gdrive:Documents";
+        localPath = "${home}/GoogleDocs";
+        configFile = "/etc/rclone.conf";
+        googleDrive.enable = true;
+      };
     };
 
     # ── Suspend/resume ──────────────────────────────────────────────────
@@ -115,6 +121,11 @@ services.rclone-remotes.bisyncs.obsidian = {
   user = "user";
   interval = "5min";
 
+  googleDrive = {
+    enable = true;
+    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # optional
+  };
+
   pandoc = {
     enable = true;
     markdownPath = "/home/user/ObsidianVault";
@@ -122,17 +133,6 @@ services.rclone-remotes.bisyncs.obsidian = {
     mdToDocxArgs = [ "--reference-doc=/home/user/template.docx" ];
     docxToMdArgs = [ "--wrap=none" "--extract-media=./media" ];
   };
-
-  extraArgs = [
-    "--verbose"
-    "--resilient"
-    "--recover"
-    "--create-empty-src-dirs"
-    "--max-lock" "5m"
-    "--compare" "size,modtime,checksum"
-    "--drive-export-formats" "docx"
-    "--drive-import-formats" "docx"
-  ];
 };
 ```
 
@@ -141,6 +141,29 @@ When pandoc is enabled:
 1. **Pre-sync**: Newer markdown files in `markdownPath` are converted to docx (applying the `strip-heading-ids` filter) and placed in `localPath`
 2. **Rclone bisync** runs between `localPath` and the remote
 3. **Post-sync**: Newer docx files from the remote are converted back to markdown (applying the `compact-lists` filter) in `markdownPath`
+
+## Google Drive integration
+
+Set `googleDrive.enable = true` on any bisync pair to automatically apply Drive-appropriate flags:
+
+- `--drive-export-formats docx` / `--drive-import-formats docx` — round-trip Google Docs as docx
+- `--fix-case` — handle Drive's case-insensitive filesystem
+- `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
+
+```nix
+services.rclone-remotes.bisyncs.gdocs = {
+  remote = "gdrive:";
+  localPath = "/home/user/GoogleDrive";
+  configFile = "/etc/rclone.conf";
+
+  googleDrive = {
+    enable = true;
+    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # omit to sync entire Drive
+    exportFormats = "docx";  # default
+    importFormats = "docx";  # default
+  };
+};
+```
 
 ## Options reference
 
@@ -184,6 +207,10 @@ When pandoc is enabled:
 | `interval` | string | `"15min"` | Re-sync interval |
 | `onBootSec` | string | `"5min"` | Delay before first sync |
 | `extraArgs` | list of strings | see below | Extra `rclone bisync` arguments |
+| `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
+| `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
+| `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
+| `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
 | `pandoc.enable` | bool | `false` | Enable md↔docx conversion |
 | `pandoc.markdownPath` | string | — | Markdown/vault directory |
 | `pandoc.syncDeletions` | bool | `false` | Propagate deletions |
@@ -192,7 +219,7 @@ When pandoc is enabled:
 
 Default `extraArgs`:
 ```nix
-[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" ]
+[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" "--conflict-resolve" "newer" "--compare" "size,modtime,checksum" ]
 ```
 
 ## How FUSE mounts work
