@@ -237,7 +237,7 @@ let
           if [ -f "$docxfile" ]; then
             ref_arg="--reference-doc=$docxfile"
           fi
-          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/strip-heading-ids.hs $ref_arg -o "$docxfile" ${mdToDocxArgs}
+          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/md2docx.hs $ref_arg -o "$docxfile" ${mdToDocxArgs}
           touch -r "$mdfile" "$docxfile"
         fi
       done
@@ -274,7 +274,7 @@ let
 
         if [ ! -f "$mdfile" ] || [ "$docxfile" -nt "$mdfile" ]; then
           mkdir -p "$(dirname "$mdfile")"
-          ${pandocBin} "$docxfile" --filter ${toString filterDir}/compact-lists.hs -o "$mdfile" ${docxToMdArgs}
+          ${pandocBin} "$docxfile" --filter ${toString filterDir}/docx2md.hs -o "$mdfile" ${docxToMdArgs}
           touch -r "$docxfile" "$mdfile"
         fi
       done
