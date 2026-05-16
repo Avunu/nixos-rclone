@@ -237,7 +237,7 @@ let
           if [ -f "$docxfile" ]; then
             ref_args=("--reference-doc=$docxfile")
           fi
-          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/md2docx.hs "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
+          ${pandocBin} "$mdfile" --from=markdown+lists_without_preceding_blankline --wrap=preserve --filter ${toString filterDir}/md2docx.hs "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
           touch -r "$mdfile" "$docxfile"
         fi
       done
