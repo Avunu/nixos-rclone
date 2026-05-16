@@ -20,7 +20,7 @@
       ];
 
       perSystem =
-        { pkgs, system, ... }:
+        { config, pkgs, system, ... }:
         let
           # Fake pandoc: records --reference-doc arg to $REFS_LOG, touches -o output
           fakePandoc = pkgs.writeShellScript "fake-pandoc" ''
@@ -111,6 +111,10 @@
             entry = "nix build .#checks.${system}.paths-with-spaces --no-link";
             language = "system";
             pass_filenames = false;
+          };
+
+          devShells.default = pkgs.mkShell {
+            shellHook = config.pre-commit.installationScript;
           };
         };
 
