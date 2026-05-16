@@ -211,6 +211,14 @@ let
   # ── Markdown sync helpers ─────────────────────────────────────────────
 
   haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
+  compile = name: src:
+    pkgs.runCommand "${name}-filter" { nativeBuildInputs = [ haskellEnv ]; } ''
+      mkdir -p $out/bin
+      ghc -outputdir "$TMPDIR" ${src} -o $out/bin/${name}
+    '';
+
+  md2docxFilter = compile "md2docx" ./filters/md2docx.hs;
+  docx2mdFilter = compile "docx2md" ./filters/docx2md.hs;
 
   mkMarkdownPreSync =
     name: syncConfig:
@@ -237,7 +245,7 @@ let
           if [ -f "$docxfile" ]; then
             ref_args=("--reference-doc=$docxfile")
           fi
-          ${pandocBin} "$mdfile" --from=markdown+lists_without_preceding_blankline --wrap=preserve --filter ${toString filterDir}/md2docx.hs "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
+          ${pandocBin} "$mdfile" --from=markdown+lists_without_preceding_blankline --wrap=preserve --filter ${md2docxFilter}/bin/md2docx "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
           touch -r "$mdfile" "$docxfile"
         fi
       done
@@ -274,7 +282,7 @@ let
 
         if [ ! -f "$mdfile" ] || [ "$docxfile" -nt "$mdfile" ]; then
           mkdir -p "$(dirname "$mdfile")"
-          ${pandocBin} "$docxfile" --filter ${toString filterDir}/docx2md.hs -o "$mdfile" ${docxToMdArgs}
+          ${pandocBin} "$docxfile" --filter ${docx2mdFilter}/bin/docx2md -o "$mdfile" ${docxToMdArgs}
           touch -r "$docxfile" "$mdfile"
         fi
       done
@@ -362,7 +370,7 @@ let
     description = "Rclone bisync for ${name}";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
-    path = optionals s.markdownSync.enable [ haskellEnv ];
+    path = optionals s.markdownSync.enable [ pkgs.pandoc ];
     serviceConfig = {
       Type = "oneshot";
       User = s.user;

@@ -27,6 +27,13 @@
           ...
         }:
         let
+          haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
+          compile = name: src:
+            pkgs.runCommand "${name}-filter" { nativeBuildInputs = [ haskellEnv ]; } ''
+              mkdir -p $out/bin
+              ghc -outputdir "$TMPDIR" ${src} -o $out/bin/${name}
+            '';
+
           # Fake pandoc: records --reference-doc arg to $REFS_LOG, touches -o output
           fakePandoc = pkgs.writeShellScript "fake-pandoc" ''
             ref_doc=""
@@ -109,6 +116,8 @@
                 touch $out
               '';
 
+          pre-commit.check.enable = false;
+
           pre-commit.settings.hooks.paths-with-spaces = {
             enable = true;
             name = "paths-with-spaces";
@@ -118,8 +127,48 @@
             pass_filenames = false;
           };
 
+          packages.md2docx-filter = compile "md2docx" ./filters/md2docx.hs;
+          packages.docx2md-filter = compile "docx2md" ./filters/docx2md.hs;
+
+          checks.round-trip = pkgs.runCommand "test-round-trip" { nativeBuildInputs = [ pkgs.pandoc ]; } ''
+            set -euo pipefail
+
+            pandoc ${inputs.self}/fixtures/test.md \
+              --from=markdown+lists_without_preceding_blankline \
+              --wrap=preserve \
+              --filter ${config.packages.md2docx-filter}/bin/md2docx \
+              -o test.docx
+
+            pandoc test.docx \
+              --filter ${config.packages.docx2md-filter}/bin/docx2md \
+              -o result.md
+
+            diff ${inputs.self}/fixtures/test.md result.md || {
+              echo "--- expected (fixture) ---"
+              cat ${inputs.self}/fixtures/test.md
+              echo "--- got (round-trip) ---"
+              cat result.md
+              exit 1
+            }
+
+            touch $out
+          '';
+
+          pre-commit.settings.hooks.round-trip = {
+            enable = true;
+            name = "round-trip";
+            description = "Verify markdown→docx→markdown round-trip matches fixture";
+            entry = "nix build .#checks.${system}.round-trip --no-link";
+            language = "system";
+            pass_filenames = false;
+          };
+
           devShells.default = pkgs.mkShell {
-            buildInputs = [ pkgs.pandoc ];
+            packages = [
+              pkgs.pandoc
+              pkgs.rclone
+              (pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]))
+            ];
             shellHook = config.pre-commit.installationScript;
           };
         };
