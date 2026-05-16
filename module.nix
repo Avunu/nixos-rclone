@@ -233,11 +233,11 @@ let
 
         if [ ! -f "$docxfile" ] || [ "$mdfile" -nt "$docxfile" ]; then
           mkdir -p "$(dirname "$docxfile")"
-          ref_arg=""
+          ref_args=()
           if [ -f "$docxfile" ]; then
-            ref_arg="--reference-doc=$docxfile"
+            ref_args=("--reference-doc=$docxfile")
           fi
-          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/md2docx.hs $ref_arg -o "$docxfile" ${mdToDocxArgs}
+          ${pandocBin} "$mdfile" --wrap=preserve --filter ${toString filterDir}/md2docx.hs "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
           touch -r "$mdfile" "$docxfile"
         fi
       done
