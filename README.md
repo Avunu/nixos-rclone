@@ -14,8 +14,8 @@ Add the flake input and import the module:
 ```nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
-    rclone-remotes.url = "github:Avunu/rclone-nixos-module";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rclone-remotes.url = "github:Avunu/nixos-rclone";
     rclone-remotes.inputs.nixpkgs.follows = "nixpkgs";
   };
 
