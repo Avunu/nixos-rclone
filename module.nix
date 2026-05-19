@@ -188,7 +188,7 @@ let
     "x-systemd.after=nss-lookup.target"
     "rw"
     "allow_other"
-    "vfs-cache-mode=writes"
+    "vfs-cache-mode=full"
     "dir-cache-time=5m"
     "poll-interval=30s"
     "multi-thread-streams=4"
