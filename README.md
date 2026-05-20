@@ -65,9 +65,7 @@ in
         remote = "gdrive:";
         localPath = "/run/media/user/GDrive";
         configFile = "/etc/rclone.conf";  # override global default
-        extraOpts = [
-          "vfs-cache-mode=full"           # full read-write caching for Drive
-        ];
+        googleDrive.enable = true;        # export Google Docs/Sheets/Slides as real files
       };
     };
 
@@ -146,9 +144,31 @@ The optional args are passed through to the Pandoc CLI, which facilitates the co
 
 ## Google Drive integration
 
-Set `googleDrive.enable = true` on any bisync pair to automatically apply Drive-appropriate flags:
+Set `googleDrive.enable = true` on any **mount** or **bisync** pair to export Google Workspace files (Docs, Sheets, Slides) as real Office files instead of 0-byte stubs.
 
-- `--drive-export-formats docx` / `--drive-import-formats docx` — round-trip Google Docs as docx
+### Mounts
+
+```nix
+services.rclone-remotes.mounts.gdrive = {
+  remote = "gdrive:";
+  localPath = "/run/media/user/GDrive";
+  configFile = "/etc/rclone.conf";
+
+  googleDrive = {
+    enable = true;
+    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # omit to mount entire Drive
+    exportFormats = "docx";  # default — Google Docs appear as .docx
+    importFormats = "docx";  # default — .docx uploads convert to Google Docs
+  };
+};
+```
+
+This passes `drive-export-formats` and `drive-import-formats` as FUSE mount options so Google Workspace files have real content.
+
+### Bisync
+
+For bisync pairs, `googleDrive.enable = true` additionally applies:
+
 - `--fix-case` — handle Drive's case-insensitive filesystem
 - `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
 
@@ -195,6 +215,10 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `group` | string | global default | Group for tmpfiles rule |
 | `dirPerms` | string | `"0755"` | Directory permissions |
 | `extraOpts` | list of strings | `[]` | Extra mount options |
+| `googleDrive.enable` | bool | `false` | Export Google Workspace files as real Office files |
+| `googleDrive.rootFolderId` | string or null | `null` | Restrict mount to a specific Drive folder ID |
+| `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs/Sheets/Slides as |
+| `googleDrive.importFormats` | string | `"docx"` | Formats to import when writing back to Drive |
 
 ### `bisyncs.<name>`
 

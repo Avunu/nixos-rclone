@@ -59,6 +59,29 @@ let
         default = [ ];
         description = "Extra options appended to the rclone mount.";
       };
+
+      googleDrive = {
+        enable = mkEnableOption "Google Drive-specific mount options (export/import formats for Workspace files)";
+
+        rootFolderId = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "Restrict mount to a specific Google Drive folder ID.";
+          example = "14zaHa9I5dpMa4AaUTt_Mi7r2_AyT6654";
+        };
+
+        exportFormats = mkOption {
+          type = types.str;
+          default = "docx";
+          description = "Comma-separated export formats for Google Workspace files (Docs→docx, etc.).";
+        };
+
+        importFormats = mkOption {
+          type = types.str;
+          default = "docx";
+          description = "Comma-separated import formats when writing back to Google Drive.";
+        };
+      };
     };
   };
 
@@ -300,6 +323,14 @@ let
 
   # ── Builders ──────────────────────────────────────────────────────────
 
+  mkGDriveMountOpts = m: optionals m.googleDrive.enable (
+    [
+      "drive-export-formats=${m.googleDrive.exportFormats}"
+      "drive-import-formats=${m.googleDrive.importFormats}"
+    ] ++ optional (m.googleDrive.rootFolderId != null)
+        "drive-root-folder-id=${m.googleDrive.rootFolderId}"
+  );
+
   mkGDriveArgs = s: optionals s.googleDrive.enable (
     [
       "--drive-export-formats" s.googleDrive.exportFormats
@@ -362,7 +393,8 @@ let
         "uid=${toString m.uid}"
         "gid=${toString m.gid}"
         "umask=022"
-      ] ++ m.extraOpts;
+      ] ++ mkGDriveMountOpts m
+        ++ m.extraOpts;
       neededForBoot = false;
     };
 
