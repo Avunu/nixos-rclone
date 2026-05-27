@@ -356,22 +356,30 @@ let
     wantedBy = [ "rclone-bisync-${name}.service" ];
     before = [ "rclone-bisync-${name}.service" ];
     unitConfig.ConditionPathExists = "!${bisyncListingPath s}";
-    serviceConfig = {
+    serviceConfig = ({
       Type = "oneshot";
       User = s.user;
       Group = s.group;
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-      ExecStart = concatStringsSep " " ([
-        "${getExe pkgs.rclone}"
-        "bisync"
-        (escapeShellArg s.localPath)
-        (escapeShellArg s.remote)
-        "--resync"
-        "--resync-mode" "newer"
-      ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
-        ++ mkGDriveArgs s
-        ++ s.extraArgs);
-    };
+      ExecStart = let
+        configArg = if s.configFile != null
+          then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
+          else "";
+        args = concatStringsSep " " ([
+          "${getExe pkgs.rclone}"
+          "bisync"
+          (escapeShellArg s.localPath)
+          (escapeShellArg s.remote)
+          "--resync"
+          "--resync-mode" "newer"
+        ] ++ mkGDriveArgs s
+          ++ s.extraArgs);
+      in pkgs.writeShellScript "rclone-bisync-${name}-init" ''
+        exec ${args} ${configArg}
+      '';
+    } // optionalAttrs (s.configFile != null) {
+      LoadCredential = [ "rclone-config:${s.configFile}" ];
+    });
   };
 
   mkFilesystem = _name: m:
@@ -403,21 +411,30 @@ let
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     path = optionals s.markdownSync.enable [ pkgs.pandoc ];
-    serviceConfig = {
+    serviceConfig = ({
       Type = "oneshot";
       User = s.user;
       Group = s.group;
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-      ExecStart = concatStringsSep " " ([
-        "${getExe pkgs.rclone}"
-        "bisync"
-        (escapeShellArg s.localPath)
-        (escapeShellArg s.remote)
-      ] ++ (optional (s.configFile != null) "--config=${escapeShellArg s.configFile}")
-        ++ mkGDriveArgs s
-        ++ s.extraArgs);
+      ExecStart = let
+        configArg = if s.configFile != null
+          then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
+          else "";
+        args = concatStringsSep " " ([
+          "${getExe pkgs.rclone}"
+          "bisync"
+          (escapeShellArg s.localPath)
+          (escapeShellArg s.remote)
+        ] ++ mkGDriveArgs s
+          ++ s.extraArgs);
+      in pkgs.writeShellScript "rclone-bisync-${name}" ''
+        exec ${args} ${configArg}
+      '';
       Restart = "on-failure";
       RestartSec = "60s";
+    }
+    // optionalAttrs (s.configFile != null) {
+      LoadCredential = [ "rclone-config:${s.configFile}" ];
     }
     // optionalAttrs s.markdownSync.enable {
       ExecStartPre = [
@@ -425,7 +442,7 @@ let
         "${mkMarkdownPreSync name s}"
       ];
       ExecStartPost = "${mkMarkdownPostSync name s}";
-    };
+    });
   };
 
   mkBisyncTimer = name: s: nameValuePair "rclone-bisync-${name}" {
