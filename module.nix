@@ -12,6 +12,11 @@ let
 
   filterDir = ./filters;
 
+  serviceEnvPackages = with pkgs; [
+    uutils-coreutils-noprefix
+    rclone
+  ];
+
   # ── Submodule: live FUSE mount ────────────────────────────────────────
   mountSubmodule = types.submodule {
     options = {
@@ -133,9 +138,12 @@ let
           "--resilient"
           "--recover"
           "--create-empty-src-dirs"
-          "--max-lock" "5m"
-          "--conflict-resolve" "newer"
-          "--compare" "size,modtime,checksum"
+          "--max-lock"
+          "5m"
+          "--conflict-resolve"
+          "newer"
+          "--compare"
+          "size,modtime,checksum"
         ];
         description = "Extra arguments passed to `rclone bisync`.";
       };
@@ -234,7 +242,8 @@ let
   # ── Markdown sync helpers ─────────────────────────────────────────────
 
   haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
-  compile = name: src:
+  compile =
+    name: src:
     pkgs.runCommand "${name}-filter" { nativeBuildInputs = [ haskellEnv ]; } ''
       mkdir -p $out/bin
       ghc -outputdir "$TMPDIR" ${src} -o $out/bin/${name}
@@ -323,141 +332,182 @@ let
 
   # ── Builders ──────────────────────────────────────────────────────────
 
-  mkGDriveMountOpts = m: optionals m.googleDrive.enable (
-    [
-      "drive-export-formats=${m.googleDrive.exportFormats}"
-      "drive-import-formats=${m.googleDrive.importFormats}"
-    ] ++ optional (m.googleDrive.rootFolderId != null)
-        "drive-root-folder-id=${m.googleDrive.rootFolderId}"
-  );
+  mkGDriveMountOpts =
+    m:
+    optionals m.googleDrive.enable (
+      [
+        "drive-export-formats=${m.googleDrive.exportFormats}"
+        "drive-import-formats=${m.googleDrive.importFormats}"
+      ]
+      ++ optional (
+        m.googleDrive.rootFolderId != null
+      ) "drive-root-folder-id=${m.googleDrive.rootFolderId}"
+    );
 
-  mkGDriveArgs = s: optionals s.googleDrive.enable (
-    [
-      "--drive-export-formats" s.googleDrive.exportFormats
-      "--drive-import-formats" s.googleDrive.importFormats
-      "--fix-case"
-      "--slow-hash-sync-only"
-    ] ++ optional (s.googleDrive.rootFolderId != null)
-        "--drive-root-folder-id=${s.googleDrive.rootFolderId}"
-  );
+  mkGDriveArgs =
+    s:
+    optionals s.googleDrive.enable (
+      [
+        "--drive-export-formats"
+        s.googleDrive.exportFormats
+        "--drive-import-formats"
+        s.googleDrive.importFormats
+        "--fix-case"
+        "--slow-hash-sync-only"
+      ]
+      ++ optional (
+        s.googleDrive.rootFolderId != null
+      ) "--drive-root-folder-id=${s.googleDrive.rootFolderId}"
+    );
 
   # Derive the listing filename rclone bisync uses under ~/.cache/rclone/bisync/
-  bisyncListingPath = s:
+  bisyncListingPath =
+    s:
     let
       path1Safe = builtins.replaceStrings [ "/" " " ] [ "_" "_" ] (lib.removePrefix "/" s.localPath);
       path2Safe = builtins.replaceStrings [ ":" "/" " " ] [ "_" "_" "_" ] s.remote;
     in
     "%h/.cache/rclone/bisync/${path1Safe}..${path2Safe}.path1.lst";
 
-  mkBisyncInitService = name: s: nameValuePair "rclone-bisync-${name}-init" {
-    description = "Initial resync for rclone bisync ${name}";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "rclone-bisync-${name}.service" ];
-    before = [ "rclone-bisync-${name}.service" ];
-    unitConfig.ConditionPathExists = "!${bisyncListingPath s}";
-    serviceConfig = ({
-      Type = "oneshot";
-      User = s.user;
-      Group = s.group;
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-      ExecStart = let
-        configArg = if s.configFile != null
-          then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
-          else "";
-        args = concatStringsSep " " ([
-          "${getExe pkgs.rclone}"
-          "bisync"
-          (escapeShellArg s.localPath)
-          (escapeShellArg s.remote)
-          "--resync"
-          "--resync-mode" "newer"
-        ] ++ mkGDriveArgs s
-          ++ s.extraArgs);
-      in pkgs.writeShellScript "rclone-bisync-${name}-init" ''
-        exec ${args} ${configArg}
-      '';
-    } // optionalAttrs (s.configFile != null) {
-      LoadCredential = [ "rclone-config:${s.configFile}" ];
-    });
-  };
+  mkBisyncInitService =
+    name: s:
+    nameValuePair "rclone-bisync-${name}-init" {
+      description = "Initial resync for rclone bisync ${name}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      wantedBy = [ "rclone-bisync-${name}.service" ];
+      before = [ "rclone-bisync-${name}.service" ];
+      unitConfig.ConditionPathExists = "!${bisyncListingPath s}";
+      path = serviceEnvPackages;
+      serviceConfig = (
+        {
+          Type = "oneshot";
+          User = s.user;
+          Group = s.group;
+          ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
+          ExecStart =
+            let
+              configArg =
+                if s.configFile != null then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"'' else "";
+              args = concatStringsSep " " (
+                [
+                  "${getExe pkgs.rclone}"
+                  "bisync"
+                  (escapeShellArg s.localPath)
+                  (escapeShellArg s.remote)
+                  "--resync"
+                  "--resync-mode"
+                  "newer"
+                ]
+                ++ mkGDriveArgs s
+                ++ s.extraArgs
+              );
+            in
+            pkgs.writeShellScript "rclone-bisync-${name}-init" ''
+              exec ${args} ${configArg}
+            '';
+        }
+        // optionalAttrs (s.configFile != null) {
+          LoadCredential = [ "rclone-config:${s.configFile}" ];
+        }
+      );
+    };
 
-  mkFilesystem = _name: m:
+  mkFilesystem =
+    _name: m:
     let
       effectiveConfig =
-        if m.configFile != null then m.configFile
-        else let
-          userCfg = config.users.users.${m.user} or {};
-          userHome = userCfg.home or "/home/${m.user}";
-        in "${userHome}/.config/rclone/rclone.conf";
-    in {
+        if m.configFile != null then
+          m.configFile
+        else
+          let
+            userCfg = config.users.users.${m.user} or { };
+            userHome = userCfg.home or "/home/${m.user}";
+          in
+          "${userHome}/.config/rclone/rclone.conf";
+    in
+    {
       device = m.remote;
       mountPoint = m.localPath;
       fsType = "rclone";
       noCheck = true;
-      options = baseMountOpts
+      options =
+        baseMountOpts
         ++ [ "config=${effectiveConfig}" ]
         ++ [
-        "uid=${toString m.uid}"
-        "gid=${toString m.gid}"
-        "umask=022"
-      ] ++ mkGDriveMountOpts m
+          "uid=${toString m.uid}"
+          "gid=${toString m.gid}"
+          "umask=022"
+        ]
+        ++ mkGDriveMountOpts m
         ++ m.extraOpts;
       neededForBoot = false;
     };
 
-  mkBisyncService = name: s: nameValuePair "rclone-bisync-${name}" {
-    description = "Rclone bisync for ${name}";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    path = optionals s.markdownSync.enable [ pkgs.pandoc ];
-    serviceConfig = ({
-      Type = "oneshot";
-      User = s.user;
-      Group = s.group;
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-      ExecStart = let
-        configArg = if s.configFile != null
-          then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
-          else "";
-        args = concatStringsSep " " ([
-          "${getExe pkgs.rclone}"
-          "bisync"
-          (escapeShellArg s.localPath)
-          (escapeShellArg s.remote)
-        ] ++ mkGDriveArgs s
-          ++ s.extraArgs);
-      in pkgs.writeShellScript "rclone-bisync-${name}" ''
-        exec ${args} ${configArg}
-      '';
-      Restart = "on-failure";
-      RestartSec = "60s";
-    }
-    // optionalAttrs (s.configFile != null) {
-      LoadCredential = [ "rclone-config:${s.configFile}" ];
-    }
-    // optionalAttrs s.markdownSync.enable {
-      ExecStartPre = [
-        "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
-        "${mkMarkdownPreSync name s}"
-      ];
-      ExecStartPost = "${mkMarkdownPostSync name s}";
-    });
-  };
-
-  mkBisyncTimer = name: s: nameValuePair "rclone-bisync-${name}" {
-    description = "Timer for rclone bisync ${name}";
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = s.onBootSec;
-      OnUnitActiveSec = s.interval;
-      Persistent = true;
-      RandomizedDelaySec = "5m";
+  mkBisyncService =
+    name: s:
+    nameValuePair "rclone-bisync-${name}" {
+      description = "Rclone bisync for ${name}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = flatten [
+        serviceEnvPackages
+        optionals s.markdownSync.enable [ pkgs.pandoc ];
+      ]
+      serviceConfig = (
+        {
+          Type = "oneshot";
+          User = s.user;
+          Group = s.group;
+          ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
+          ExecStart =
+            let
+              configArg =
+                if s.configFile != null then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"'' else "";
+              args = concatStringsSep " " (
+                [
+                  "${getExe pkgs.rclone}"
+                  "bisync"
+                  (escapeShellArg s.localPath)
+                  (escapeShellArg s.remote)
+                ]
+                ++ mkGDriveArgs s
+                ++ s.extraArgs
+              );
+            in
+            pkgs.writeShellScript "rclone-bisync-${name}" ''
+              exec ${args} ${configArg}
+            '';
+          Restart = "on-failure";
+          RestartSec = "60s";
+        }
+        // optionalAttrs (s.configFile != null) {
+          LoadCredential = [ "rclone-config:${s.configFile}" ];
+        }
+        // optionalAttrs s.markdownSync.enable {
+          ExecStartPre = [
+            "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
+            "${mkMarkdownPreSync name s}"
+          ];
+          ExecStartPost = "${mkMarkdownPostSync name s}";
+        }
+      );
     };
-  };
 
-  mkTmpfile = _name: r:
-    "d '${r.localPath}' ${r.dirPerms} ${r.user} ${r.group} -";
+  mkBisyncTimer =
+    name: s:
+    nameValuePair "rclone-bisync-${name}" {
+      description = "Timer for rclone bisync ${name}";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = s.onBootSec;
+        OnUnitActiveSec = s.interval;
+        Persistent = true;
+        RandomizedDelaySec = "5m";
+      };
+    };
+
+  mkTmpfile = _name: r: "d '${r.localPath}' ${r.dirPerms} ${r.user} ${r.group} -";
 
 in
 {
@@ -566,7 +616,6 @@ in
     systemd.timers = listToAttrs (mapAttrsToList mkBisyncTimer cfg.bisyncs);
 
     systemd.tmpfiles.rules =
-      (mapAttrsToList mkTmpfile cfg.mounts)
-      ++ (mapAttrsToList mkTmpfile cfg.bisyncs);
+      (mapAttrsToList mkTmpfile cfg.mounts) ++ (mapAttrsToList mkTmpfile cfg.bisyncs);
   };
 }
