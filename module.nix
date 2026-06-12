@@ -404,6 +404,21 @@ let
         ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
     '';
 
+  # Clean up a stale/dangling FUSE mount point. When rclone dies uncleanly
+  # (crash, kill, lost network), FUSE leaves the mount entry behind. A plain
+  # restart then fails forever with "directory already mounted". This lazily
+  # unmounts the point if (and only if) it is currently a mountpoint, so it is
+  # safe to run both before start and after stop.
+  mkMountCleanup = name: m:
+    pkgs.writeShellScript "rclone-mount-cleanup-${name}" ''
+      set -uo pipefail
+      if ${pkgs.util-linux}/bin/mountpoint -q ${escapeShellArg m.localPath}; then
+        ${pkgs.fuse3}/bin/fusermount3 -uz ${escapeShellArg m.localPath} \
+          || ${pkgs.util-linux}/bin/umount -l ${escapeShellArg m.localPath} \
+          || true
+      fi
+    '';
+
   # systemd.mounts entry for mounts WITHOUT a custom configFile
   # (automount on first access, unmount after idle).
   mkMount = name: m: {
@@ -431,7 +446,12 @@ let
         Type = "simple";
         RuntimeDirectory = "rclone-${name}";
         LoadCredential = "rclone-config:${m.configFile}";
+        # Clear any stale FUSE mount left by a previous unclean exit before
+        # (re)mounting, and again after stop, so a restart can never wedge on
+        # "directory already mounted".
+        ExecStartPre = "${mkMountCleanup name m}";
         ExecStart = "${mkCredMountExec name m}";
+        ExecStopPost = "${mkMountCleanup name m}";
         Restart = "on-failure";
         RestartSec = "10s";
         # Capability for FUSE mount with --allow-other
