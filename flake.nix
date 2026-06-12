@@ -27,12 +27,7 @@
           ...
         }:
         let
-          haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
-          compile = name: src:
-            pkgs.runCommand "${name}-filter" { nativeBuildInputs = [ haskellEnv ]; } ''
-              mkdir -p $out/bin
-              ghc -outputdir "$TMPDIR" ${src} -o $out/bin/${name}
-            '';
+          filters = import ./filters pkgs;
 
           # Fake pandoc: records --reference-doc arg to $REFS_LOG, touches -o output
           fakePandoc = pkgs.writeShellScript "fake-pandoc" ''
@@ -127,8 +122,8 @@
             pass_filenames = false;
           };
 
-          packages.md2docx-filter = compile "md2docx" ./filters/md2docx.hs;
-          packages.docx2md-filter = compile "docx2md" ./filters/docx2md.hs;
+          packages.md2docx-filter = filters.md2docx;
+          packages.docx2md-filter = filters.docx2md;
 
           checks.round-trip = pkgs.runCommand "test-round-trip" { nativeBuildInputs = [ pkgs.pandoc ]; } ''
             set -euo pipefail
@@ -161,6 +156,101 @@
             entry = "nix build .#checks.${system}.round-trip --no-link";
             language = "system";
             pass_filenames = false;
+          };
+
+          # End-to-end VM test: automount + credential staging + bisync
+          # init-once semantics and deletion propagation.
+          checks.module-test = pkgs.testers.runNixOSTest {
+            name = "rclone-remotes";
+
+            nodes.machine =
+              { pkgs, ... }:
+              {
+                imports = [ ./module.nix ];
+
+                virtualisation.memorySize = 1024;
+
+                users.users.alice = {
+                  isNormalUser = true;
+                  uid = 1000;
+                  group = "users";
+                };
+
+                # Local-backed remote so no network is needed.
+                environment.etc."rclone-test.conf".text = ''
+                  [testremote]
+                  type = alias
+                  remote = /srv/remote-data
+                '';
+
+                systemd.tmpfiles.rules = [
+                  "d /srv/remote-data 0777 root root -"
+                  "d /srv/remote-data/mountdir 0777 root root -"
+                  "d /srv/remote-data/syncdir 0777 root root -"
+                ];
+
+                services.rclone-remotes = {
+                  enable = true;
+                  defaultUser = "alice";
+                  defaultGroup = "users";
+
+                  mounts.test = {
+                    remote = "testremote:mountdir";
+                    localPath = "/mnt/test";
+                    configFile = "/etc/rclone-test.conf";
+                  };
+
+                  bisyncs.test = {
+                    # A plain local path, not the alias remote: rclone
+                    # canonicalizes aliases when naming its bisync listing
+                    # files, which would defeat the init-once condition.
+                    remote = "/srv/remote-data/syncdir";
+                    localPath = "/home/alice/sync";
+                    configFile = "/etc/rclone-test.conf";
+                    user = "alice";
+                    # Keep the timer out of the test's way.
+                    onBootSec = "1h";
+                  };
+                };
+              };
+
+            testScript = ''
+              machine.wait_for_unit("multi-user.target")
+
+              with subtest("automount triggers on access, credential staging works"):
+                  machine.succeed("echo hello > /srv/remote-data/mountdir/seed.txt")
+                  machine.wait_for_unit("mnt-test.automount")
+                  out = machine.succeed("cat /mnt/test/seed.txt")
+                  assert "hello" in out, f"unexpected mount content: {out!r}"
+                  machine.succeed("systemctl is-active rclone-config.service")
+                  machine.succeed("test -f /run/rclone/test.conf")
+
+              with subtest("writes through the mount reach the backing dir"):
+                  machine.succeed("echo back > /mnt/test/write.txt")
+                  machine.wait_until_succeeds(
+                      "test -f /srv/remote-data/mountdir/write.txt", timeout=60
+                  )
+
+              with subtest("bisync: initial resync seeds the remote"):
+                  machine.succeed("sudo -u alice mkdir -p /home/alice/sync")
+                  machine.succeed("sudo -u alice touch /home/alice/sync/a.txt /home/alice/sync/b.txt")
+                  machine.succeed("systemctl start rclone-bisync-test.service")
+                  machine.succeed("test -f /srv/remote-data/syncdir/a.txt")
+
+              with subtest("bisync: deletions propagate, init is condition-skipped"):
+                  # Keep b.txt: bisync (correctly) refuses to sync a directory
+                  # that became completely empty.
+                  machine.succeed("rm /home/alice/sync/a.txt")
+                  machine.succeed("systemctl start rclone-bisync-test.service")
+                  machine.succeed("test ! -e /srv/remote-data/syncdir/a.txt")
+                  machine.succeed("test -f /srv/remote-data/syncdir/b.txt")
+                  # rclone logs this once per actual run; a condition-skipped
+                  # start logs nothing, so the count is the number of resyncs.
+                  runs = machine.succeed(
+                      "journalctl -u rclone-bisync-test-init.service | grep -c 'Bisync successful' || true"
+                  ).strip()
+                  assert runs == "1", f"init resync ran {runs} times, expected 1"
+            '';
           };
 
           devShells.default = pkgs.mkShell {
