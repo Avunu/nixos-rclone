@@ -209,24 +209,31 @@ let
 
   # ── Mount option baseline ─────────────────────────────────────────────
   baseMountOpts = [
-    "_netdev"
-    "allow_other"
-    "buffer-size=64M"
-    "dir-cache-time=5m"
-    "multi-thread-streams=4"
-    "noauto"
-    "rw"
-    "timeout=1m"
-    "transfers=4"
-    "vfs-cache-max-age=24h"
-    "vfs-cache-mode=full"
-    "vfs-read-chunk-size-limit=512M"
-    "vfs-read-chunk-size=64M"
-    "x-systemd.after=network-online.target"
+    # Systemd Mount Architecture
     "x-systemd.automount"
+    "noauto"
+    "_netdev"
     "x-systemd.idle-timeout=600"
     "x-systemd.mount-timeout=120s"
     "x-systemd.requires=network-online.target"
+    "x-systemd.after=network-online.target"
+
+    # Rclone Core Operations
+    "rw"
+    "allow_other"
+    "vfs-cache-mode=full" # Required for multi-protocol compatibility
+    "dir-cache-time=5m" # Balances resource usage and directory updates
+    "vfs-cache-max-age=24h"
+
+    # Network & Performance Safeguards
+    "transfers=4" # Prevents WebDAV rate-limiting & SFTP channel flooding
+    "multi-thread-streams=4"
+    "timeout=1m" # CRITICAL: Prevents systemd from locking the GUI during a drop
+
+    # Chunked Streaming Optimization
+    "vfs-read-chunk-size=64M"
+    "vfs-read-chunk-size-limit=512M"
+    "buffer-size=64M"
   ];
 
   # ── Markdown sync helpers ─────────────────────────────────────────────
