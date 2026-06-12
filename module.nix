@@ -207,35 +207,6 @@ let
     };
   };
 
-  # ── Mount option baseline ─────────────────────────────────────────────
-  baseMountOpts = [
-    # Systemd Mount Architecture
-    "x-systemd.automount"
-    "noauto"
-    "_netdev"
-    "x-systemd.idle-timeout=600"
-    "x-systemd.mount-timeout=120s"
-    "x-systemd.requires=network-online.target"
-    "x-systemd.after=network-online.target"
-
-    # Rclone Core Operations
-    "rw"
-    "allow_other"
-    "vfs-cache-mode=full" # Required for multi-protocol compatibility
-    "dir-cache-time=5m" # Balances resource usage and directory updates
-    "vfs-cache-max-age=24h"
-
-    # Network & Performance Safeguards
-    "transfers=4" # Prevents WebDAV rate-limiting & SFTP channel flooding
-    "multi-thread-streams=4"
-    "timeout=1m" # CRITICAL: Prevents systemd from locking the GUI during a drop
-
-    # Chunked Streaming Optimization
-    "vfs-read-chunk-size=64M"
-    "vfs-read-chunk-size-limit=512M"
-    "buffer-size=64M"
-  ];
-
   # ── Markdown sync helpers ─────────────────────────────────────────────
 
   haskellEnv = pkgs.haskellPackages.ghcWithPackages (ps: [ ps.pandoc ]);
@@ -373,21 +344,32 @@ let
     "_netdev"
   ];
 
-  # Rclone FUSE options passed as -o to `rclone mount`.
-  mkRcloneOpts = m:
-    let
-      isSysOpt = opt: opt == "noauto" || opt == "_netdev" || builtins.substring 0 10 opt == "x-systemd.";
-      rcloneBase = filter (opt: !isSysOpt opt) baseMountOpts;
-    in
-    rcloneBase
-    ++ [ "uid=${toString m.uid}" "gid=${toString m.gid}" "umask=022" ]
-    ++ mkGDriveMountOpts m
+  # Rclone mount flags — all native `--flag=value` style (NOT passed via
+  # `-o` to FUSE).  This avoids the "not supported with this FUSE backend"
+  # error and works identically in .mount + .service units.
+  mkRcloneFlags = m:
+    [
+      "--allow-other"
+      "--uid=${toString m.uid}"
+      "--gid=${toString m.gid}"
+      "--umask=022"
+      "--vfs-cache-mode=full"
+      "--dir-cache-time=5m"
+      "--vfs-cache-max-age=24h"
+      "--transfers=4"
+      "--multi-thread-streams=4"
+      "--timeout=1m"
+      "--vfs-read-chunk-size=64M"
+      "--vfs-read-chunk-size-limit=512M"
+      "--buffer-size=64M"
+    ]
+    ++ (map (opt: "--${opt}") (mkGDriveMountOpts m))
     ++ m.extraOpts;
 
-  # Wrapper for non-credential mounts — config resolved from user home.
+  # Mount exec for non-credential mounts — .mount + .automount path.
+  # Points at the user's default rclone config.
   mkMountExec = name: m:
     let
-      optsStr = concatStringsSep "," (mkRcloneOpts m);
       userCfg = config.users.users.${m.user} or { };
       userHome = userCfg.home or "/home/${m.user}";
     in
@@ -395,25 +377,29 @@ let
       set -euo pipefail
       exec ${pkgs.rclone}/bin/rclone mount \
         --config ${escapeShellArg "${userHome}/.config/rclone/rclone.conf"} \
-        -o "${optsStr}" \
+        ${escapeShellArgs (mkRcloneFlags m)} \
         ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
     '';
 
-  # Wrapper for credential mounts — config from LoadCredential
-  # (only available in .service units, not .mount units).
+  # Mount exec for credential mounts — .service with LoadCredential.
+  # Copies the credential to a writable RuntimeDirectory so rclone
+  # can persist config changes (token refreshes, etc.).
   mkCredMountExec = name: m:
     let
-      optsStr = concatStringsSep "," (mkRcloneOpts m);
+      flags = mkRcloneFlags m;
     in
     pkgs.writeShellScript "rclone-cred-mount-${name}" ''
       set -euo pipefail
+      config="/run/rclone-${name}/rclone.conf"
+      cp "$CREDENTIALS_DIRECTORY/rclone-config" "$config"
       exec ${pkgs.rclone}/bin/rclone mount \
-        --config "$CREDENTIALS_DIRECTORY/rclone-config" \
-        -o "${optsStr}" \
+        --config "$config" \
+        ${escapeShellArgs flags} \
         ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
     '';
 
-  # systemd.mounts entry for mounts WITHOUT a custom configFile.
+  # systemd.mounts entry for mounts WITHOUT a custom configFile
+  # (automount on first access, unmount after idle).
   mkMount = name: m: {
     what = m.remote;
     where = m.localPath;
@@ -426,8 +412,9 @@ let
     mountConfig.ExecMount = "${mkMountExec name m}";
   };
 
-  # systemd.services entry for mounts WITH a custom configFile
-  # (LoadCredential is only supported in .service units).
+  # systemd.services entry for mounts WITH a custom configFile.
+  # Uses LoadCredential to inject the agenix secret, and runs as
+  # root so fusermount3 can mount with --allow-other.
   mkMountService = name: m:
     nameValuePair "rclone-mount-${name}" {
       description = "Rclone mount for ${name}";
@@ -436,12 +423,13 @@ let
       wantedBy = [ "default.target" ];
       serviceConfig = {
         Type = "simple";
-        User = m.user;
-        Group = m.group;
+        RuntimeDirectory = "rclone-${name}";
         LoadCredential = "rclone-config:${m.configFile}";
         ExecStart = "${mkCredMountExec name m}";
         Restart = "on-failure";
         RestartSec = "10s";
+        # Capability for FUSE mount with --allow-other
+        AmbientCapabilities = "CAP_SYS_ADMIN";
       };
     };
 
