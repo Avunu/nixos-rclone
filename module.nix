@@ -366,6 +366,64 @@ let
     in
     "%h/.cache/rclone/bisync/${path1Safe}..${path2Safe}.path1.lst";
 
+  # ── Mount helpers ─────────────────────────────────────────────────────
+
+  # Systemd mount Options= (comma-separated).  No x-systemd.automount
+  # here because we define automount units explicitly.
+  sysMountOpts = concatStringsSep "," [
+    "noauto"
+    "_netdev"
+  ];
+
+  # Rclone FUSE options passed as -o to `rclone mount`.
+  mkRcloneOpts = m:
+    let
+      isSysOpt = opt: opt == "noauto" || opt == "_netdev" || builtins.substring 0 10 opt == "x-systemd.";
+      rcloneBase = filter (opt: !isSysOpt opt) baseMountOpts;
+    in
+    rcloneBase
+    ++ [ "uid=${toString m.uid}" "gid=${toString m.gid}" "umask=022" ]
+    ++ mkGDriveMountOpts m
+    ++ m.extraOpts;
+
+  # Wrapper script that calls `rclone mount` with the correct config source.
+  # * configFile != null → LoadCredential path (injected by systemd)
+  # * configFile == null → default per-user config path
+  mkMountExec = name: m:
+    let
+      optsStr = concatStringsSep "," (mkRcloneOpts m);
+      configArg =
+        if m.configFile != null
+        then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
+        else let
+          userCfg = config.users.users.${m.user} or { };
+          userHome = userCfg.home or "/home/${m.user}";
+        in ''--config ${escapeShellArg "${userHome}/.config/rclone/rclone.conf"}'';
+    in
+    pkgs.writeShellScript "rclone-mount-${name}" ''
+      set -euo pipefail
+      exec ${pkgs.rclone}/bin/rclone mount \
+        ${configArg} \
+        -o "${optsStr}" \
+        ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
+    '';
+
+  # Build a systemd.mounts entry for a given mount definition.
+  mkMount = name: m: {
+    what = m.remote;
+    where = m.localPath;
+    type = "rclone";
+    options = sysMountOpts;
+    unitConfig = {
+      Requires = [ "network-online.target" ];
+      After = [ "network-online.target" ];
+    };
+    mountConfig.ExecMount = "${mkMountExec name m}";
+    serviceConfig = optionalAttrs (m.configFile != null) {
+      LoadCredential = [ "rclone-config:${m.configFile}" ];
+    };
+  };
+
   mkBisyncInitService =
     name: s:
     nameValuePair "rclone-bisync-${name}-init" {
@@ -408,37 +466,6 @@ let
           LoadCredential = [ "rclone-config:${s.configFile}" ];
         }
       );
-    };
-
-  mkFilesystem =
-    _name: m:
-    let
-      effectiveConfig =
-        if m.configFile != null then
-          m.configFile
-        else
-          let
-            userCfg = config.users.users.${m.user} or { };
-            userHome = userCfg.home or "/home/${m.user}";
-          in
-          "${userHome}/.config/rclone/rclone.conf";
-    in
-    {
-      device = m.remote;
-      mountPoint = m.localPath;
-      fsType = "rclone";
-      noCheck = true;
-      options =
-        baseMountOpts
-        ++ [ "config=${effectiveConfig}" ]
-        ++ [
-          "uid=${toString m.uid}"
-          "gid=${toString m.gid}"
-          "umask=022"
-        ]
-        ++ mkGDriveMountOpts m
-        ++ m.extraOpts;
-      neededForBoot = false;
     };
 
   mkBisyncService =
@@ -579,7 +606,14 @@ in
 
     environment.systemPackages = [ pkgs.rclone ];
 
-    fileSystems = mapAttrs mkFilesystem cfg.mounts;
+    # All mounts as systemd mount + automount pairs
+    systemd.mounts = mapAttrsToList mkMount cfg.mounts;
+
+    systemd.automounts = mapAttrsToList (name: m: {
+      where = m.localPath;
+      wantedBy = [ "local-fs.target" ];
+      automountConfig.TimeoutIdleSec = "600";
+    }) cfg.mounts;
 
     systemd.services =
       listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
