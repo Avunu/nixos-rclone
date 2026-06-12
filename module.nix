@@ -452,8 +452,8 @@ let
       wants = [ "network-online.target" ];
       path = flatten [
         serviceEnvPackages
-        optionals s.markdownSync.enable [ pkgs.pandoc ];
-      ]
+        (optionals s.markdownSync.enable [ pkgs.pandoc ])
+      ];
       serviceConfig = (
         {
           Type = "oneshot";
