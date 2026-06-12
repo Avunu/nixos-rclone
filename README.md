@@ -250,15 +250,34 @@ Default `extraArgs`:
 
 ## How FUSE mounts work
 
-Mounts use `fileSystems` with `fsType = "rclone"` and systemd automount. They are:
+Mounts use `fileSystems` with `fsType = "rclone"`, relying on the `mount.rclone`
+helper that the module installs via `system.fsPackages`. The helper translates
+mount options (`vfs-cache-mode=full`, `config=...`, ...) into rclone flags.
+Mounts are:
 
 - **Lazy**: not mounted until first access (`noauto` + `x-systemd.automount`)
 - **Network-aware**: depend on `network-online.target`
 - **Auto-unmounting**: idle timeout of 600s
-- **Resilient**: aggressive retry and timeout settings
-- **Cached**: VFS write-through cache with chunked reads
+- **Cached**: VFS write-through cache with chunked reads. Because systemd runs
+  mount helpers with an empty environment (no `$HOME`), each mount gets an
+  explicit cache directory at `/var/cache/rclone/<name>`.
 
-The module also creates a `rclone-mount-reset` service that clears failed mount/automount units after suspend/resume, allowing transparent reconnection on next access.
+### Credential configs
+
+`.mount` units cannot use systemd's `LoadCredential`, and rclone wants to write
+token refreshes back to its config file, which a read-only secret (e.g. agenix)
+would reject. For every mount with a `configFile`, a single `rclone-config`
+oneshot service stages a writable copy at `/run/rclone/<name>.conf` (mode 0600,
+root-only) before the mount starts. The staged copy is re-created from the
+secret on reboot and on config changes.
+
+### Suspend/resume recovery
+
+The `rclone-mount-reset` service runs after resume. For each configured mount
+it lazily unmounts stale FUSE mounts (left behind when rclone dies uncleanly —
+"transport endpoint is not connected") and clears the failed state of exactly
+that mount's `.mount`/`.automount` units, so the next access transparently
+remounts. Healthy mounts are left untouched.
 
 ## License
 
