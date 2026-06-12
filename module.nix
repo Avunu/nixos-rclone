@@ -368,8 +368,6 @@ let
 
   # ── Mount helpers ─────────────────────────────────────────────────────
 
-  # Systemd mount Options= (comma-separated).  No x-systemd.automount
-  # here because we define automount units explicitly.
   sysMountOpts = concatStringsSep "," [
     "noauto"
     "_netdev"
@@ -386,29 +384,36 @@ let
     ++ mkGDriveMountOpts m
     ++ m.extraOpts;
 
-  # Wrapper script that calls `rclone mount` with the correct config source.
-  # * configFile != null → LoadCredential path (injected by systemd)
-  # * configFile == null → default per-user config path
+  # Wrapper for non-credential mounts — config resolved from user home.
   mkMountExec = name: m:
     let
       optsStr = concatStringsSep "," (mkRcloneOpts m);
-      configArg =
-        if m.configFile != null
-        then ''--config "$CREDENTIALS_DIRECTORY/rclone-config"''
-        else let
-          userCfg = config.users.users.${m.user} or { };
-          userHome = userCfg.home or "/home/${m.user}";
-        in ''--config ${escapeShellArg "${userHome}/.config/rclone/rclone.conf"}'';
+      userCfg = config.users.users.${m.user} or { };
+      userHome = userCfg.home or "/home/${m.user}";
     in
     pkgs.writeShellScript "rclone-mount-${name}" ''
       set -euo pipefail
       exec ${pkgs.rclone}/bin/rclone mount \
-        ${configArg} \
+        --config ${escapeShellArg "${userHome}/.config/rclone/rclone.conf"} \
         -o "${optsStr}" \
         ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
     '';
 
-  # Build a systemd.mounts entry for a given mount definition.
+  # Wrapper for credential mounts — config from LoadCredential
+  # (only available in .service units, not .mount units).
+  mkCredMountExec = name: m:
+    let
+      optsStr = concatStringsSep "," (mkRcloneOpts m);
+    in
+    pkgs.writeShellScript "rclone-cred-mount-${name}" ''
+      set -euo pipefail
+      exec ${pkgs.rclone}/bin/rclone mount \
+        --config "$CREDENTIALS_DIRECTORY/rclone-config" \
+        -o "${optsStr}" \
+        ${escapeShellArg m.remote} ${escapeShellArg m.localPath}
+    '';
+
+  # systemd.mounts entry for mounts WITHOUT a custom configFile.
   mkMount = name: m: {
     what = m.remote;
     where = m.localPath;
@@ -419,10 +424,26 @@ let
       After = [ "network-online.target" ];
     };
     mountConfig.ExecMount = "${mkMountExec name m}";
-    serviceConfig = optionalAttrs (m.configFile != null) {
-      LoadCredential = [ "rclone-config:${m.configFile}" ];
-    };
   };
+
+  # systemd.services entry for mounts WITH a custom configFile
+  # (LoadCredential is only supported in .service units).
+  mkMountService = name: m:
+    nameValuePair "rclone-mount-${name}" {
+      description = "Rclone mount for ${name}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      wantedBy = [ "default.target" ];
+      serviceConfig = {
+        Type = "simple";
+        User = m.user;
+        Group = m.group;
+        LoadCredential = "rclone-config:${m.configFile}";
+        ExecStart = "${mkCredMountExec name m}";
+        Restart = "on-failure";
+        RestartSec = "10s";
+      };
+    };
 
   mkBisyncInitService =
     name: s:
@@ -606,17 +627,19 @@ in
 
     environment.systemPackages = [ pkgs.rclone ];
 
-    # All mounts as systemd mount + automount pairs
-    systemd.mounts = mapAttrsToList mkMount cfg.mounts;
+    # ── Mounts without a custom configFile — .mount + .automount ────────
+    systemd.mounts = mapAttrsToList mkMount (filterAttrs (_name: m: m.configFile == null) cfg.mounts);
 
     systemd.automounts = mapAttrsToList (name: m: {
       where = m.localPath;
       wantedBy = [ "local-fs.target" ];
       automountConfig.TimeoutIdleSec = "600";
-    }) cfg.mounts;
+    }) (filterAttrs (_name: m: m.configFile == null) cfg.mounts);
 
+    # ── Mounts WITH a custom configFile — .service with LoadCredential ──
     systemd.services =
-      listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
+      listToAttrs (mapAttrsToList mkMountService (filterAttrs (_name: m: m.configFile != null) cfg.mounts))
+      // listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
       // listToAttrs (mapAttrsToList mkBisyncInitService cfg.bisyncs)
       // optionalAttrs (cfg.enableMountReset && cfg.mounts != { }) {
         rclone-mount-reset = {
@@ -639,6 +662,7 @@ in
             ExecStart = pkgs.writeShellScript "reset-rclone-mounts" ''
               ${pkgs.systemd}/bin/systemctl reset-failed 'home-*.mount' 2>/dev/null || true
               ${pkgs.systemd}/bin/systemctl reset-failed 'home-*.automount' 2>/dev/null || true
+              ${pkgs.systemd}/bin/systemctl restart 'rclone-mount-*' 2>/dev/null || true
             '';
           };
         };
