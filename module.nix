@@ -362,6 +362,12 @@ let
       "--vfs-read-chunk-size=64M"
       "--vfs-read-chunk-size-limit=512M"
       "--buffer-size=64M"
+
+      # SFTP: disable remote hash checking (md5sum/sha1sum via SSH).
+      # The shell-escaping of special characters (spaces, parentheses, etc.)
+      # in remote paths is fragile and causes false "corrupted on transfer"
+      # errors.  We fall back to comparing size + modtime instead.
+      "--sftp-disable-hashcheck"
     ]
     ++ (map (opt: "--${opt}") (mkGDriveMountOpts m))
     ++ m.extraOpts;
