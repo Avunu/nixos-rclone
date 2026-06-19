@@ -172,6 +172,15 @@ For bisync pairs, `googleDrive.enable = true` additionally applies:
 - `--fix-case` — handle Drive's case-insensitive filesystem
 - `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
 
+> **Bisync + native Google Docs don't mix.** `importFormats = "docx"` (the
+> default) makes every uploaded `.docx` get converted into a *native Google
+> Doc*. Native Google Docs have no stable checksum and Google rewrites their
+> `modifiedTime` on every save, so bisync sees the remote as "changed" on every
+> run; the moment you also edit the local copy it collides and rclone spawns an
+> endless stream of `.conflictN` files. For bisync pairs that round-trip
+> documents, set `importFormats = null` so files stay plain `.docx` (still
+> editable in Drive's Office compatibility mode) and round-trip deterministically.
+
 ```nix
 services.rclone-remotes.bisyncs.gdocs = {
   remote = "gdrive:";
@@ -181,8 +190,8 @@ services.rclone-remotes.bisyncs.gdocs = {
   googleDrive = {
     enable = true;
     rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # omit to sync entire Drive
-    exportFormats = "docx";  # default
-    importFormats = "docx";  # default
+    exportFormats = "docx";  # default — read any pre-existing Google Docs
+    importFormats = null;    # keep uploads as plain .docx (recommended for bisync)
   };
 };
 ```
@@ -217,8 +226,8 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `extraOpts` | list of strings | `[]` | Extra mount options |
 | `googleDrive.enable` | bool | `false` | Export Google Workspace files as real Office files |
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict mount to a specific Drive folder ID |
-| `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs/Sheets/Slides as |
-| `googleDrive.importFormats` | string | `"docx"` | Formats to import when writing back to Drive |
+| `googleDrive.exportFormats` | string or null | `"docx"` | Formats to export Google Docs/Sheets/Slides as (`null` omits the flag) |
+| `googleDrive.importFormats` | string or null | `"docx"` | Formats to convert uploads into native Google Workspace files; `null` keeps them as plain Office files |
 
 ### `bisyncs.<name>`
 
@@ -235,8 +244,8 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `extraArgs` | list of strings | see below | Extra `rclone bisync` arguments |
 | `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
-| `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
-| `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
+| `googleDrive.exportFormats` | string or null | `"docx"` | Formats to export Google Docs as (`null` omits the flag) |
+| `googleDrive.importFormats` | string or null | `"docx"` | Convert uploads into native Google Docs; set `null` to keep plain `.docx` (recommended for bisync — see warning above) |
 | `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
 | `markdownSync.path` | string | — | Markdown/vault directory |
 | `markdownSync.syncDeletions` | bool | `false` | Propagate deletions |

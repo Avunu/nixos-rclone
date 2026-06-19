@@ -54,15 +54,25 @@ let
     };
 
     exportFormats = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       default = "docx";
-      description = "Comma-separated export formats for Google Workspace files (Docs→docx, etc.).";
+      description = "Comma-separated export formats for Google Workspace files (Docs→docx, etc.). Null omits --drive-export-formats entirely.";
     };
 
     importFormats = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       default = "docx";
-      description = "Comma-separated import formats when writing back to Google Drive.";
+      description = ''
+        Comma-separated import formats when writing back to Google Drive.
+        When set (e.g. "docx"), uploaded Office files are converted into native
+        Google Workspace files (a Google Doc, etc.). Set to null to upload them
+        as-is and keep them as plain Office files.
+
+        For bisync pairs, prefer null: native Google Docs cannot be reliably
+        bisynced. They have no stable checksum and Google rewrites their modtime
+        on every save, so the remote looks "changed" on every run and collides
+        with local edits, producing an endless stream of .conflictN files.
+      '';
     };
   };
 
@@ -320,10 +330,12 @@ let
   mkGDriveMountOpts =
     m:
     optionals m.googleDrive.enable (
-      [
-        "drive-export-formats=${m.googleDrive.exportFormats}"
-        "drive-import-formats=${m.googleDrive.importFormats}"
-      ]
+      optional (
+        m.googleDrive.exportFormats != null
+      ) "drive-export-formats=${m.googleDrive.exportFormats}"
+      ++ optional (
+        m.googleDrive.importFormats != null
+      ) "drive-import-formats=${m.googleDrive.importFormats}"
       ++ optional (
         m.googleDrive.rootFolderId != null
       ) "drive-root-folder-id=${m.googleDrive.rootFolderId}"
@@ -332,11 +344,15 @@ let
   mkGDriveArgs =
     s:
     optionals s.googleDrive.enable (
-      [
+      optionals (s.googleDrive.exportFormats != null) [
         "--drive-export-formats"
         s.googleDrive.exportFormats
+      ]
+      ++ optionals (s.googleDrive.importFormats != null) [
         "--drive-import-formats"
         s.googleDrive.importFormats
+      ]
+      ++ [
         "--fix-case"
         "--slow-hash-sync-only"
       ]
