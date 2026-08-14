@@ -236,6 +236,25 @@ let
           description = "Propagate deletions between markdown and docx directories.";
         };
 
+        trackMoves = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Follow moves and renames instead of duplicating them.
+
+            The two trees are matched by path, so relocating a file on one side
+            reads as "deleted here, created there" on the other, and the stale
+            counterpart regenerates the document at its old path on the next
+            run — leaving it at both paths, in both trees, permanently. rclone
+            bisync cannot help here: it has no rename tracking and models every
+            move as delete + create.
+
+            With this on, an orphaned file is paired with a newly-appeared one
+            of the same basename and moved to match. Only unambiguous 1:1
+            pairings are followed; anything else is logged and left alone.
+          '';
+        };
+
         mdToDocxArgs = mkOption {
           type = types.listOf types.str;
           default = [ ];
@@ -254,6 +273,11 @@ let
 
   # ── Markdown sync helpers ─────────────────────────────────────────────
 
+  # Shared by the pre- and post-sync hooks; see mirror-moves.sh for the why.
+  # Kept in a plain .sh file rather than inline so it can be sourced directly by
+  # checks.move-tracking, and so it is not written through Nix string escaping.
+  mirrorMovesFn = builtins.readFile ./mirror-moves.sh;
+
   mkMarkdownPreSync =
     name: syncConfig:
     let
@@ -268,6 +292,13 @@ let
 
       md_dir=${escapeShellArg mdDir}
       docx_dir=${escapeShellArg docxDir}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        ${mirrorMovesFn}
+        # Vault is authoritative for paths here: follow md moves with the docx,
+        # so bisync sees a move as delete+create rather than create-only.
+        mirror_moves "$md_dir" .md "$docx_dir" .docx
+      ''}
 
       md_files=("$md_dir"/**/*.md)
 
@@ -318,6 +349,13 @@ let
 
       md_dir=${escapeShellArg mdDir}
       docx_dir=${escapeShellArg docxDir}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        ${mirrorMovesFn}
+        # bisync has just applied the remote's moves to the docx tree, so the
+        # docx side is authoritative for paths here: follow them with the md.
+        mirror_moves "$docx_dir" .docx "$md_dir" .md
+      ''}
 
       docx_files=("$docx_dir"/**/*.docx)
 

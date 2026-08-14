@@ -111,6 +111,74 @@
                 touch $out
               '';
 
+          # Move/rename tracking: a relocation on one side must be *followed*
+          # on the other, not duplicated. Exercises mirror-moves.sh directly.
+          checks.move-tracking =
+            pkgs.runCommand "test-move-tracking" { nativeBuildInputs = [ pkgs.bash ]; }
+              ''
+                set -euo pipefail
+                shopt -s globstar nullglob
+                source ${./mirror-moves.sh}
+
+                S="$TMPDIR/vault"; D="$TMPDIR/docx"
+                # A genuine move or rename preserves mtime on both sides.
+                mk() { mkdir -p "$(dirname "$1")"; : > "$1"; touch -d "$2" "$1"; }
+
+                # Steady state, including the same basename in two folders --
+                # neither of these may be disturbed.
+                mk "$S/Advisors Thank-you letter.md"          "2023-06-20 15:50:05.1"
+                mk "$D/Advisors Thank-you letter.docx"        "2023-06-20 15:50:05.1"
+                mk "$S/Letters/Advisors Thank-you letter.md"  "2024-01-02 03:04:05.2"
+                mk "$D/Letters/Advisors Thank-you letter.docx" "2024-01-02 03:04:05.2"
+
+                # 1. relocated AND edited in transit -> paired by basename
+                mk "$D/Mediation Plan - Shenk & Burkholder.docx"       "2024-12-22 02:19:04.5"
+                mk "$S/Archive/Mediation Plan - Shenk & Burkholder.md" "2026-08-07 10:39:10.9"
+                # 2. whole-directory move
+                mk "$D/Proj/a.docx"         "2025-03-03 03:03:03.3"
+                mk "$S/Archive/Proj/a.md"   "2025-03-03 03:03:03.3"
+                # 3. pure rename in place -> basename differs, paired by mtime
+                mk "$D/Old Name.docx" "2026-05-05 05:05:05.5"
+                mk "$S/New Name.md"   "2026-05-05 05:05:05.5"
+                # 4. renamed AND relocated at once
+                mk "$D/Notes from Ordination Discussion.docx" "2025-09-26 09:29:32.7"
+                mk "$S/Archive/Ordination Notes.md"           "2025-09-26 09:29:32.7"
+                # 5/6. a real delete and a real create, which must NOT be paired
+                mk "$D/DeletedInVault.docx" "2026-01-01 01:01:01"
+                mk "$S/BrandNew.md"         "2026-02-02 02:02:02"
+                # 7. same basename moved twice over -> disambiguated by mtime
+                mk "$D/x/Dup.docx" "2026-06-06 06:06:06.6"; mk "$S/p/Dup.md" "2026-06-06 06:06:06.6"
+                mk "$D/y/Dup.docx" "2026-07-07 07:07:07.7"; mk "$S/q/Dup.md" "2026-07-07 07:07:07.7"
+
+                mirror_moves "$S" .md "$D" .docx
+
+                want() {
+                  [ -e "$D/$1" ] || { echo "FAIL: expected '$1' to exist"; exit 1; }
+                }
+                gone() {
+                  [ ! -e "$D/$1" ] || { echo "FAIL: expected '$1' to be gone"; exit 1; }
+                }
+
+                want "Advisors Thank-you letter.docx"
+                want "Letters/Advisors Thank-you letter.docx"
+                want "Archive/Mediation Plan - Shenk & Burkholder.docx"
+                gone "Mediation Plan - Shenk & Burkholder.docx"
+                want "Archive/Proj/a.docx";        gone "Proj/a.docx"
+                want "New Name.docx";              gone "Old Name.docx"
+                want "Archive/Ordination Notes.docx"
+                gone "Notes from Ordination Discussion.docx"
+                want "p/Dup.docx"; want "q/Dup.docx"; gone "x/Dup.docx"; gone "y/Dup.docx"
+                # A delete is not a move, and neither is a create.
+                want "DeletedInVault.docx"
+                gone "BrandNew.docx"
+
+                # Nothing invented, nothing lost: 9 docx in, 9 docx out.
+                total=$(find "$D" -name '*.docx' | wc -l)
+                [ "$total" -eq 9 ] || { echo "FAIL: $total docx files, expected 9"; find "$D"; exit 1; }
+
+                touch $out
+              '';
+
           pre-commit.check.enable = false;
 
           pre-commit.settings.hooks.paths-with-spaces = {
@@ -118,6 +186,15 @@
             name = "paths-with-spaces";
             description = "Verify paths with spaces are handled correctly in markdown sync";
             entry = "nix build .#checks.${system}.paths-with-spaces --no-link";
+            language = "system";
+            pass_filenames = false;
+          };
+
+          pre-commit.settings.hooks.move-tracking = {
+            enable = true;
+            name = "move-tracking";
+            description = "Verify moves and renames are followed, not duplicated";
+            entry = "nix build .#checks.${system}.move-tracking --no-link";
             language = "system";
             pass_filenames = false;
           };
