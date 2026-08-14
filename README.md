@@ -136,11 +136,36 @@ services.rclone-remotes.bisyncs.obsidian = {
 
 When markdown sync is enabled:
 
-1. **Pre-sync**: Newer markdown files in `path` are converted to docx and placed in `localPath`
+1. **Pre-sync**: Moves/renames made in `path` are mirrored onto `localPath`, then newer markdown files are converted to docx and placed there
 2. **Rclone bisync** runs between `localPath` and the remote
-3. **Post-sync**: Newer docx files from the remote are converted back to markdown in `path`
+3. **Post-sync**: Moves/renames that arrived from the remote are mirrored onto `path`, then newer docx files are converted back to markdown
 
 The optional args are passed through to the Pandoc CLI, which facilitates the conversion process.
+
+### Moves and renames
+
+The two trees are matched by path, so relocating or renaming a file on one side
+reads as "deleted here, created there" on the other. Left alone, the stale
+counterpart regenerates the document at its old path on the next run, so the
+move never sticks and the file ends up at **both** paths, in **both** trees,
+permanently. rclone bisync cannot help: it has no rename tracking and models
+every move as delete + create.
+
+`markdownSync.trackMoves` (on by default) closes this. An orphaned file is
+paired with a newly-appeared one and moved to match, using two passes:
+
+- **basename** — survives a relocation, even if the file was edited in transit
+- **mtime** — survives a rename, which changes the basename but not the
+  timestamp (a Drive move rewrites `parents`, not `modifiedTime`)
+
+Only unambiguous 1:1 matches are acted on; anything else is logged and left
+alone, as are genuine creates and deletes. Whole-directory moves work, since
+their members pair individually. A file both renamed *and* edited before the
+next run cannot be paired by either key — it is reported as an unpaired
+orphan/new pair for you to resolve.
+
+Note that deletions still need `syncDeletions = true` to propagate; without it
+an orphan is kept and will regenerate its counterpart.
 
 ## Google Drive integration
 
@@ -172,11 +197,32 @@ For bisync pairs, `googleDrive.enable = true` additionally applies:
 - `--fix-case` — handle Drive's case-insensitive filesystem
 - `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
 
+> **Bisyncing native Google Docs needs `settlePass`.** With `importFormats`
+> set (the default), every uploaded `.docx` is converted into a *native Google
+> Doc*. Native Docs report `Size: -1` and no checksum, so modtime is the only
+> change signal bisync has for the remote — and Drive rewrites it itself when
+> the conversion finishes, seconds after rclone recorded the modtime it asked
+> for. Every upload therefore makes the *next* run see the remote as "changed"
+> even though nobody touched it. Alone that is harmless. But if the local side
+> also changed in that window, bisync sees both sides as changed, declares a
+> conflict, and drops a `.conflictN` file — on every run, for as long as you
+> keep editing locally. Enable `settlePass` to close the window.
+
 ```nix
 services.rclone-remotes.bisyncs.gdocs = {
   remote = "gdrive:";
   localPath = "/home/user/GoogleDrive";
   configFile = "/etc/rclone.conf";
+
+  settlePass.enable = true;  # required when importFormats is set
+
+  extraArgs = [
+    "--verbose" "--resilient" "--recover" "--create-empty-src-dirs"
+    "--max-lock" "5m"
+    "--conflict-resolve" "newer"
+    "--conflict-loser" "delete"  # don't keep .conflictN debris
+    "--compare" "size,modtime,checksum"
+  ];
 
   googleDrive = {
     enable = true;
@@ -186,6 +232,12 @@ services.rclone-remotes.bisyncs.gdocs = {
   };
 };
 ```
+
+If you don't need documents to be *native* Google Docs, setting
+`importFormats = null` is the stronger fix: uploads stay plain `.docx`, keeping
+a real size and md5, and bisync becomes fully deterministic. Note that rclone
+cannot update an *existing* native Doc without `--drive-import-formats`, so a
+folder that already contains Google Docs must be migrated first.
 
 ## Options reference
 
@@ -233,6 +285,8 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `interval` | string | `"15min"` | Re-sync interval |
 | `onBootSec` | string | `"5min"` | Delay before first sync |
 | `extraArgs` | list of strings | see below | Extra `rclone bisync` arguments |
+| `settlePass.enable` | bool | `false` | Run a second bisync pass to reconcile remotes that rewrite modtimes after upload (see Google Drive above) |
+| `settlePass.delay` | int | `30` | Seconds between the two passes |
 | `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
@@ -240,6 +294,7 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
 | `markdownSync.path` | string | — | Markdown/vault directory |
 | `markdownSync.syncDeletions` | bool | `false` | Propagate deletions |
+| `markdownSync.trackMoves` | bool | `true` | Follow moves/renames instead of duplicating them (see above) |
 | `markdownSync.mdToDocxArgs` | list of strings | `[]` | Extra args (md→docx) |
 | `markdownSync.docxToMdArgs` | list of strings | `["--wrap=none"]` | Extra args (docx→md) |
 

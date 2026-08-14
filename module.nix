@@ -180,6 +180,40 @@ let
         description = "Extra arguments passed to `rclone bisync`.";
       };
 
+      settlePass = {
+        enable = mkEnableOption ''
+          a second bisync pass, to reconcile remotes that rewrite modtimes
+          after an upload.
+
+          Google Drive does this whenever `--drive-import-formats` converts an
+          uploaded file into a native Google Doc: the conversion finishes
+          asynchronously and stamps the Doc's `modifiedTime` with the
+          conversion time, seconds after rclone has already recorded the
+          modtime it asked for. The next run therefore sees Path2 as "changed"
+          even though nobody touched the remote. On its own that is harmless —
+          bisync just pulls the file back down — but if the local side changed
+          in the same window, bisync sees both sides as changed and declares a
+          conflict, spraying `.conflictN` files on every run.
+
+          The second pass closes that window: it runs after the first has
+          uploaded, so it pulls the restamped remote copy back down and the
+          listings converge *within* the run instead of colliding at the next
+          one. Pre/post-sync hooks run once each, around both passes, so the
+          local side cannot change between them and the second pass cannot
+          itself conflict.
+        '';
+
+        delay = mkOption {
+          type = types.int;
+          default = 30;
+          description = ''
+            Seconds to wait between the two passes, to give the remote time to
+            finish rewriting modtimes. Observed Google Drive conversion lag is
+            5-10s; the default leaves generous headroom.
+          '';
+        };
+      };
+
       googleDrive = googleDriveOptions;
 
       markdownSync = {
@@ -202,6 +236,25 @@ let
           description = "Propagate deletions between markdown and docx directories.";
         };
 
+        trackMoves = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Follow moves and renames instead of duplicating them.
+
+            The two trees are matched by path, so relocating a file on one side
+            reads as "deleted here, created there" on the other, and the stale
+            counterpart regenerates the document at its old path on the next
+            run — leaving it at both paths, in both trees, permanently. rclone
+            bisync cannot help here: it has no rename tracking and models every
+            move as delete + create.
+
+            With this on, an orphaned file is paired with a newly-appeared one
+            of the same basename and moved to match. Only unambiguous 1:1
+            pairings are followed; anything else is logged and left alone.
+          '';
+        };
+
         mdToDocxArgs = mkOption {
           type = types.listOf types.str;
           default = [ ];
@@ -220,6 +273,11 @@ let
 
   # ── Markdown sync helpers ─────────────────────────────────────────────
 
+  # Shared by the pre- and post-sync hooks; see mirror-moves.sh for the why.
+  # Kept in a plain .sh file rather than inline so it can be sourced directly by
+  # checks.move-tracking, and so it is not written through Nix string escaping.
+  mirrorMovesFn = builtins.readFile ./mirror-moves.sh;
+
   mkMarkdownPreSync =
     name: syncConfig:
     let
@@ -234,6 +292,13 @@ let
 
       md_dir=${escapeShellArg mdDir}
       docx_dir=${escapeShellArg docxDir}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        ${mirrorMovesFn}
+        # Vault is authoritative for paths here: follow md moves with the docx,
+        # so bisync sees a move as delete+create rather than create-only.
+        mirror_moves "$md_dir" .md "$docx_dir" .docx
+      ''}
 
       md_files=("$md_dir"/**/*.md)
 
@@ -284,6 +349,13 @@ let
 
       md_dir=${escapeShellArg mdDir}
       docx_dir=${escapeShellArg docxDir}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        ${mirrorMovesFn}
+        # bisync has just applied the remote's moves to the docx tree, so the
+        # docx side is authoritative for paths here: follow them with the md.
+        mirror_moves "$docx_dir" .docx "$md_dir" .md
+      ''}
 
       docx_files=("$docx_dir"/**/*.docx)
 
@@ -361,10 +433,19 @@ let
   # ── Mounts ────────────────────────────────────────────────────────────
 
   credMounts = filterAttrs (_name: m: m.configFile != null) cfg.mounts;
+  credBisyncs = filterAttrs (_name: s: s.configFile != null) cfg.bisyncs;
 
   # Writable staging copy so rclone can persist config changes (token
   # refreshes, etc.) that it cannot write to a read-only secret.
   stagedConfigPath = name: "/run/rclone/${name}.conf";
+
+  # Bisyncs get a private directory rather than a bare file: rclone rewrites a
+  # config by creating a temp file *alongside* it and renaming, so the parent
+  # directory has to be writable by the unit's User= too. LoadCredential can't
+  # serve this — $CREDENTIALS_DIRECTORY is read-only, which makes every OAuth
+  # token refresh fail with "Failed to save config after 10 tries".
+  stagedBisyncDir = name: "/run/rclone/bisync-${name}";
+  stagedBisyncConfigPath = name: "${stagedBisyncDir name}/rclone.conf";
 
   # The rclone mount helper (mount.rclone, via system.fsPackages) translates
   # `opt=value` mount options into `--opt=value` flags. systemd runs mount
@@ -432,7 +513,7 @@ let
   # ── Bisync services ───────────────────────────────────────────────────
 
   mkBisyncExec =
-    scriptName: s: initArgs:
+    name: scriptName: s: initArgs:
     let
       argv = [
         (getExe pkgs.rclone)
@@ -442,21 +523,23 @@ let
       ]
       ++ initArgs
       ++ mkGDriveArgs s
-      ++ s.extraArgs;
-      configArg = optionalString (
-        s.configFile != null
-      ) ''--config "$CREDENTIALS_DIRECTORY/rclone-config"'';
+      ++ s.extraArgs
+      ++ optionals (s.configFile != null) [
+        "--config"
+        (stagedBisyncConfigPath name)
+      ];
     in
     pkgs.writeShellScript scriptName ''
-      exec ${escapeShellArgs argv} ${configArg}
+      exec ${escapeShellArgs argv}
     '';
 
   mkBisyncInitService =
     name: s:
     nameValuePair "rclone-bisync-${name}-init" {
       description = "Initial resync for rclone bisync ${name}";
-      after = [ "network-online.target" ];
+      after = [ "network-online.target" ] ++ optional (s.configFile != null) "rclone-config.service";
       wants = [ "network-online.target" ];
+      requires = optional (s.configFile != null) "rclone-config.service";
       # requiredBy (not wantedBy): a failed initial resync must block the
       # main sync instead of letting it fail confusingly on missing listings.
       requiredBy = [ "rclone-bisync-${name}.service" ];
@@ -468,23 +551,24 @@ let
         User = s.user;
         Group = s.group;
         ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-        ExecStart = mkBisyncExec "rclone-bisync-${name}-init" s [
+        ExecStart = mkBisyncExec name "rclone-bisync-${name}-init" s [
           "--resync"
           "--resync-mode"
           "newer"
         ];
-      }
-      // optionalAttrs (s.configFile != null) {
-        LoadCredential = [ "rclone-config:${s.configFile}" ];
       };
     };
 
   mkBisyncService =
     name: s:
+    let
+      bisyncExec = mkBisyncExec name "rclone-bisync-${name}" s [ ];
+    in
     nameValuePair "rclone-bisync-${name}" {
       description = "Rclone bisync for ${name}";
-      after = [ "network-online.target" ];
+      after = [ "network-online.target" ] ++ optional (s.configFile != null) "rclone-config.service";
       wants = [ "network-online.target" ];
+      requires = optional (s.configFile != null) "rclone-config.service";
       path = flatten [
         serviceEnvPackages
         (optionals s.markdownSync.enable [ pkgs.pandoc ])
@@ -497,13 +581,20 @@ let
           "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
         ]
         ++ optional s.markdownSync.enable "${mkMarkdownPreSync name s}";
-        ExecStart = mkBisyncExec "rclone-bisync-${name}" s [ ];
+        # Type=oneshot runs multiple ExecStart= lines in sequence, and the
+        # Pre/Post hooks bracket all of them — so the markdown conversion still
+        # happens exactly once per run, with both bisync passes inside it.
+        # The settle pass is prefixed "-" (non-fatal): it is an optimisation,
+        # and a transient failure there must not fail a run whose first pass
+        # succeeded, nor skip the post-sync conversion.
+        ExecStart = [ "${bisyncExec}" ]
+        ++ optionals s.settlePass.enable [
+          "${pkgs.coreutils}/bin/sleep ${toString s.settlePass.delay}"
+          "-${bisyncExec}"
+        ];
         ExecStartPost = optional s.markdownSync.enable "${mkMarkdownPostSync name s}";
         # No Restart=: the timer is the retry mechanism. A bisync failure
         # that needs --resync would otherwise loop uselessly.
-      }
-      // optionalAttrs (s.configFile != null) {
-        LoadCredential = [ "rclone-config:${s.configFile}" ];
       };
     };
 
@@ -611,20 +702,25 @@ in
       systemd.services =
         listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
         // listToAttrs (mapAttrsToList mkBisyncInitService cfg.bisyncs)
-        // optionalAttrs (credMounts != { }) {
+        // optionalAttrs (credMounts != { } || credBisyncs != { }) {
           # Stage credential-backed configs into a writable location: .mount
           # units cannot use LoadCredential, and rclone wants to persist token
           # refreshes, which a read-only secret would reject on every refresh.
           rclone-config = {
-            description = "Stage rclone configs for credential-backed mounts";
-            restartTriggers = mapAttrsToList (_name: m: m.configFile) credMounts;
+            description = "Stage rclone configs for credential-backed mounts and bisyncs";
+            restartTriggers =
+              mapAttrsToList (_name: m: m.configFile) credMounts
+              ++ mapAttrsToList (_name: s: s.configFile) credBisyncs;
             serviceConfig = {
               Type = "oneshot";
               # Keep the unit active so RuntimeDirectory survives while mounts
-              # are using the staged configs.
+              # and bisyncs are using the staged configs.
               RemainAfterExit = true;
               RuntimeDirectory = "rclone";
-              RuntimeDirectoryMode = "0700";
+              # 0711, not 0700: bisync units run as their own User= and must
+              # traverse /run/rclone to reach their private staging directory.
+              # Traverse-only keeps the mount configs unlistable.
+              RuntimeDirectoryMode = "0711";
               ExecStart = pkgs.writeShellScript "rclone-config-stage" (
                 ''
                   set -euo pipefail
@@ -634,6 +730,12 @@ in
                     name: m:
                     "${pkgs.coreutils}/bin/install -m 600 ${escapeShellArg m.configFile} ${escapeShellArg (stagedConfigPath name)}"
                   ) credMounts
+                  ++ flatten (
+                    mapAttrsToList (name: s: [
+                      "${pkgs.coreutils}/bin/install -d -m 700 -o ${escapeShellArg s.user} -g ${escapeShellArg s.group} ${escapeShellArg (stagedBisyncDir name)}"
+                      "${pkgs.coreutils}/bin/install -m 600 -o ${escapeShellArg s.user} -g ${escapeShellArg s.group} ${escapeShellArg s.configFile} ${escapeShellArg (stagedBisyncConfigPath name)}"
+                    ]) credBisyncs
+                  )
                 )
               );
             };
