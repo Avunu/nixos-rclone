@@ -163,7 +163,7 @@ let
         default = "5min";
         description = "Delay after boot before the first sync.";
       };
-      extraArgs = mkOption {
+      baseArgs = mkOption {
         type = types.listOf types.str;
         default = [
           "--verbose"
@@ -172,36 +172,102 @@ let
           "--create-empty-src-dirs"
           "--max-lock"
           "5m"
-          "--conflict-resolve"
-          "newer"
           "--compare"
           "size,modtime,checksum"
         ];
-        description = "Extra arguments passed to `rclone bisync`.";
+        description = ''
+          Base arguments passed to `rclone bisync`. Replace this only to drop or
+          change one of the defaults; to *add* arguments use `extraArgs`, which
+          is appended on top.
+
+          Conflict handling lives in `conflictResolve`/`conflictLoser` rather
+          than here, so that changing it does not mean restating this list.
+        '';
+      };
+
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Additional arguments appended to `rclone bisync`, on top of
+          `baseArgs` and the conflict and Google Drive flags.
+        '';
+        example = [ "--drive-acknowledge-abuse" ];
+      };
+
+      conflictResolve = mkOption {
+        type = types.enum [
+          "none"
+          "path1"
+          "path2"
+          "newer"
+          "older"
+          "larger"
+          "smaller"
+        ];
+        default = "newer";
+        description = ''
+          How to pick the winner when a file changed on both sides
+          (`--conflict-resolve`). rclone's own default is `none`, which keeps
+          both; `newer` is a better fit for a periodic timer, where the side
+          you touched most recently is almost always the one you meant.
+        '';
+      };
+
+      conflictLoser = mkOption {
+        type = types.enum [
+          "num"
+          "pathname"
+          "delete"
+        ];
+        default = "delete";
+        description = ''
+          What to do with the losing copy of a conflict (`--conflict-loser`).
+
+          - `num` — keep it as `file.docx.conflict1`, `.conflict2`, … This is
+            rclone's own default and the conservative choice: nothing is ever
+            discarded, at the cost of debris if conflicts are frequent.
+          - `pathname` — keep it as `file.docx.path1` / `.path2`.
+          - `delete` — discard it, keeping the winner only.
+
+          Note that `delete` loses a version of a *genuine* simultaneous edit.
+          It pairs well with `settlePass`, which removes the spurious conflicts
+          that would otherwise dominate; but if conflicts are rare in your
+          setup, they are more likely to be real, and `num` is the safer pick.
+        '';
       };
 
       settlePass = {
-        enable = mkEnableOption ''
-          a second bisync pass, to reconcile remotes that rewrite modtimes
-          after an upload.
+        enable = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Run a second bisync pass, to reconcile remotes that rewrite modtimes
+            after an upload.
 
-          Google Drive does this whenever `--drive-import-formats` converts an
-          uploaded file into a native Google Doc: the conversion finishes
-          asynchronously and stamps the Doc's `modifiedTime` with the
-          conversion time, seconds after rclone has already recorded the
-          modtime it asked for. The next run therefore sees Path2 as "changed"
-          even though nobody touched the remote. On its own that is harmless —
-          bisync just pulls the file back down — but if the local side changed
-          in the same window, bisync sees both sides as changed and declares a
-          conflict, spraying `.conflictN` files on every run.
+            Google Drive does this whenever `--drive-import-formats` converts an
+            uploaded file into a native Google Doc: the conversion finishes
+            asynchronously and stamps the Doc's `modifiedTime` with the
+            conversion time, seconds after rclone has already recorded the
+            modtime it asked for. The next run therefore sees Path2 as "changed"
+            even though nobody touched the remote. On its own that is harmless —
+            bisync just pulls the file back down — but if the local side changed
+            in the same window, bisync sees both sides as changed and declares a
+            conflict, spraying `.conflictN` files on every run.
 
-          The second pass closes that window: it runs after the first has
-          uploaded, so it pulls the restamped remote copy back down and the
-          listings converge *within* the run instead of colliding at the next
-          one. Pre/post-sync hooks run once each, around both passes, so the
-          local side cannot change between them and the second pass cannot
-          itself conflict.
-        '';
+            The second pass closes that window: it runs after the first has
+            uploaded, so it pulls the restamped remote copy back down and the
+            listings converge *within* the run instead of colliding at the next
+            one. Pre/post-sync hooks run once each, around both passes, so the
+            local side cannot change between them and the second pass cannot
+            itself conflict.
+
+            On by default, because getting this wrong corrupts a pair quietly.
+            Turn it off for remotes that store modtimes faithfully — SFTP,
+            WebDAV, plain local paths — where the extra pass buys nothing and
+            costs a full second listing plus `delay` seconds on every run.
+          '';
+        };
 
         delay = mkOption {
           type = types.int;
@@ -232,8 +298,19 @@ let
 
         syncDeletions = mkOption {
           type = types.bool;
-          default = false;
-          description = "Propagate deletions between markdown and docx directories.";
+          default = true;
+          description = ''
+            Propagate deletions between the markdown and docx directories.
+
+            On by default: without it a deletion never sticks. The surviving
+            counterpart simply regenerates the document at its old path on the
+            next run, the same resurrection that `trackMoves` fixes for moves.
+
+            `trackMoves` runs first and consumes relocations, so only genuine
+            deletions reach this pass, and a side that is empty or unmounted is
+            skipped rather than propagated. It does still delete files, though —
+            set it to `false` if you would rather let orphans accumulate.
+          '';
         };
 
         trackMoves = mkOption {
@@ -522,6 +599,13 @@ let
         s.remote
       ]
       ++ initArgs
+      ++ s.baseArgs
+      ++ [
+        "--conflict-resolve"
+        s.conflictResolve
+        "--conflict-loser"
+        s.conflictLoser
+      ]
       ++ mkGDriveArgs s
       ++ s.extraArgs
       ++ optionals (s.configFile != null) [

@@ -77,12 +77,8 @@ in
         dirPerms = "0700";
         interval = "15min";
         onBootSec = "2min";
+        # appended to baseArgs, not a replacement for it
         extraArgs = [
-          "--verbose"
-          "--resilient"
-          "--recover"
-          "--create-empty-src-dirs"
-          "--max-lock" "5m"
           "--checksum"
           "--links"
         ];
@@ -127,7 +123,7 @@ services.rclone-remotes.bisyncs.obsidian = {
   markdownSync = {
     enable = true;
     path = "/home/user/ObsidianVault";
-    syncDeletions = true;
+    # syncDeletions and trackMoves are on by default
     mdToDocxArgs = [ "--reference-doc=/home/user/template.docx" ];
     docxToMdArgs = [ "--wrap=none" "--extract-media=./media" ];
   };
@@ -164,8 +160,8 @@ their members pair individually. A file both renamed *and* edited before the
 next run cannot be paired by either key — it is reported as an unpaired
 orphan/new pair for you to resolve.
 
-Note that deletions still need `syncDeletions = true` to propagate; without it
-an orphan is kept and will regenerate its counterpart.
+Deletions are handled by `syncDeletions`, which runs *after* this pass so that
+only genuine deletions reach it.
 
 ## Google Drive integration
 
@@ -206,7 +202,7 @@ For bisync pairs, `googleDrive.enable = true` additionally applies:
 > even though nobody touched it. Alone that is harmless. But if the local side
 > also changed in that window, bisync sees both sides as changed, declares a
 > conflict, and drops a `.conflictN` file — on every run, for as long as you
-> keep editing locally. Enable `settlePass` to close the window.
+> keep editing locally. `settlePass` closes the window and is on by default.
 
 ```nix
 services.rclone-remotes.bisyncs.gdocs = {
@@ -214,15 +210,9 @@ services.rclone-remotes.bisyncs.gdocs = {
   localPath = "/home/user/GoogleDrive";
   configFile = "/etc/rclone.conf";
 
-  settlePass.enable = true;  # required when importFormats is set
-
-  extraArgs = [
-    "--verbose" "--resilient" "--recover" "--create-empty-src-dirs"
-    "--max-lock" "5m"
-    "--conflict-resolve" "newer"
-    "--conflict-loser" "delete"  # don't keep .conflictN debris
-    "--compare" "size,modtime,checksum"
-  ];
+  # settlePass, conflictResolve = "newer" and conflictLoser = "delete" are
+  # all defaults, so nothing extra is needed here. Prefer keeping losers?
+  #   conflictLoser = "num";
 
   googleDrive = {
     enable = true;
@@ -272,6 +262,25 @@ folder that already contains Google Docs must be migrated first.
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs/Sheets/Slides as |
 | `googleDrive.importFormats` | string | `"docx"` | Formats to import when writing back to Drive |
 
+### Upgrading
+
+Three defaults changed once native-Google-Docs support was fixed. If you are
+coming from an earlier revision:
+
+- **`extraArgs` is now additive**, appended to `baseArgs` rather than replacing
+  it. If you had copied the old default list into `extraArgs` just to add a flag,
+  delete the copy and keep only your additions — otherwise you will pass some
+  flags twice. To *drop* one of the defaults, set `baseArgs` instead.
+- **Conflict handling moved out of `extraArgs`** into `conflictResolve` and
+  `conflictLoser`. Note `conflictLoser` defaults to `delete`, which discards the
+  losing copy; set it to `"num"` for rclone's keep-everything behaviour.
+- **`markdownSync.syncDeletions` and `settlePass.enable` now default to `true`.**
+  The first means deletions actually propagate — including ones you had been
+  relying on *not* propagating. The second costs a second listing pass plus
+  `settlePass.delay` seconds per run, which is wasted on any backend that stores
+  modtimes faithfully (SFTP, WebDAV, local); set `settlePass.enable = false`
+  there.
+
 ### `bisyncs.<name>`
 
 | Option | Type | Default | Description |
@@ -284,8 +293,11 @@ folder that already contains Google Docs must be migrated first.
 | `dirPerms` | string | `"0755"` | Directory permissions |
 | `interval` | string | `"15min"` | Re-sync interval |
 | `onBootSec` | string | `"5min"` | Delay before first sync |
-| `extraArgs` | list of strings | see below | Extra `rclone bisync` arguments |
-| `settlePass.enable` | bool | `false` | Run a second bisync pass to reconcile remotes that rewrite modtimes after upload (see Google Drive above) |
+| `baseArgs` | list of strings | see below | Base `rclone bisync` arguments; replace to drop a default |
+| `extraArgs` | list of strings | `[]` | Additional arguments, appended to `baseArgs` |
+| `conflictResolve` | enum | `"newer"` | Which side wins a conflict (`--conflict-resolve`) |
+| `conflictLoser` | enum | `"delete"` | What happens to the losing copy: `num`, `pathname` or `delete` |
+| `settlePass.enable` | bool | `true` | Run a second bisync pass to reconcile remotes that rewrite modtimes after upload (see Google Drive above); turn off for SFTP/WebDAV/local |
 | `settlePass.delay` | int | `30` | Seconds between the two passes |
 | `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
@@ -293,14 +305,22 @@ folder that already contains Google Docs must be migrated first.
 | `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
 | `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
 | `markdownSync.path` | string | — | Markdown/vault directory |
-| `markdownSync.syncDeletions` | bool | `false` | Propagate deletions |
+| `markdownSync.syncDeletions` | bool | `true` | Propagate deletions (without it, a deletion is undone on the next run) |
 | `markdownSync.trackMoves` | bool | `true` | Follow moves/renames instead of duplicating them (see above) |
 | `markdownSync.mdToDocxArgs` | list of strings | `[]` | Extra args (md→docx) |
 | `markdownSync.docxToMdArgs` | list of strings | `["--wrap=none"]` | Extra args (docx→md) |
 
-Default `extraArgs`:
+Default `baseArgs`:
 ```nix
-[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" "--conflict-resolve" "newer" "--compare" "size,modtime,checksum" ]
+[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" "--compare" "size,modtime,checksum" ]
+```
+
+The conflict flags are not in that list — they come from `conflictResolve` and
+`conflictLoser`, so changing conflict behaviour does not mean restating
+everything else. Final argument order is:
+
+```
+baseArgs ++ conflict flags ++ Google Drive flags ++ extraArgs
 ```
 
 ## How FUSE mounts work
