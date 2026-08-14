@@ -172,11 +172,32 @@ For bisync pairs, `googleDrive.enable = true` additionally applies:
 - `--fix-case` — handle Drive's case-insensitive filesystem
 - `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
 
+> **Bisyncing native Google Docs needs `settlePass`.** With `importFormats`
+> set (the default), every uploaded `.docx` is converted into a *native Google
+> Doc*. Native Docs report `Size: -1` and no checksum, so modtime is the only
+> change signal bisync has for the remote — and Drive rewrites it itself when
+> the conversion finishes, seconds after rclone recorded the modtime it asked
+> for. Every upload therefore makes the *next* run see the remote as "changed"
+> even though nobody touched it. Alone that is harmless. But if the local side
+> also changed in that window, bisync sees both sides as changed, declares a
+> conflict, and drops a `.conflictN` file — on every run, for as long as you
+> keep editing locally. Enable `settlePass` to close the window.
+
 ```nix
 services.rclone-remotes.bisyncs.gdocs = {
   remote = "gdrive:";
   localPath = "/home/user/GoogleDrive";
   configFile = "/etc/rclone.conf";
+
+  settlePass.enable = true;  # required when importFormats is set
+
+  extraArgs = [
+    "--verbose" "--resilient" "--recover" "--create-empty-src-dirs"
+    "--max-lock" "5m"
+    "--conflict-resolve" "newer"
+    "--conflict-loser" "delete"  # don't keep .conflictN debris
+    "--compare" "size,modtime,checksum"
+  ];
 
   googleDrive = {
     enable = true;
@@ -186,6 +207,12 @@ services.rclone-remotes.bisyncs.gdocs = {
   };
 };
 ```
+
+If you don't need documents to be *native* Google Docs, setting
+`importFormats = null` is the stronger fix: uploads stay plain `.docx`, keeping
+a real size and md5, and bisync becomes fully deterministic. Note that rclone
+cannot update an *existing* native Doc without `--drive-import-formats`, so a
+folder that already contains Google Docs must be migrated first.
 
 ## Options reference
 
@@ -233,6 +260,8 @@ services.rclone-remotes.bisyncs.gdocs = {
 | `interval` | string | `"15min"` | Re-sync interval |
 | `onBootSec` | string | `"5min"` | Delay before first sync |
 | `extraArgs` | list of strings | see below | Extra `rclone bisync` arguments |
+| `settlePass.enable` | bool | `false` | Run a second bisync pass to reconcile remotes that rewrite modtimes after upload (see Google Drive above) |
+| `settlePass.delay` | int | `30` | Seconds between the two passes |
 | `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |

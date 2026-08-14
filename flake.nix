@@ -210,6 +210,10 @@
                     user = "alice";
                     # Keep the timer out of the test's way.
                     onBootSec = "1h";
+                    settlePass = {
+                      enable = true;
+                      delay = 1;
+                    };
                   };
                 };
               };
@@ -250,6 +254,27 @@
                       "journalctl -u rclone-bisync-test-init.service | grep -c 'Bisync successful' || true"
                   ).strip()
                   assert runs == "1", f"init resync ran {runs} times, expected 1"
+
+              with subtest("bisync config is staged writable, so token refreshes persist"):
+                  # LoadCredential's $CREDENTIALS_DIRECTORY is read-only, which
+                  # makes rclone fail every OAuth token refresh. The staged copy
+                  # lives in a directory the unit's User= owns, so rclone can
+                  # write the temp file it renames into place.
+                  machine.succeed("test -f /run/rclone/bisync-test/rclone.conf")
+                  owner = machine.succeed("stat -c %U /run/rclone/bisync-test").strip()
+                  assert owner == "alice", f"staging dir owned by {owner!r}, expected 'alice'"
+                  machine.succeed("sudo -u alice test -w /run/rclone/bisync-test")
+
+              with subtest("settlePass runs a second bisync inside one service start"):
+                  def successes():
+                      return int(machine.succeed(
+                          "journalctl -u rclone-bisync-test.service | grep -c 'Bisync successful' || true"
+                      ).strip())
+
+                  before = successes()
+                  machine.succeed("systemctl start rclone-bisync-test.service")
+                  delta = successes() - before
+                  assert delta == 2, f"one start produced {delta} bisync passes, expected 2"
             '';
           };
 
