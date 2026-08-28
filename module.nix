@@ -9,6 +9,7 @@
 
 let
   inherit (lib)
+    concatMap
     concatStringsSep
     escapeShellArg
     escapeShellArgs
@@ -66,6 +67,98 @@ let
     };
   };
 
+  # ── Shared option fragment: SFTP ─────────────────────────────────────
+  sftpOptions = {
+    pathOverride = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "@/volume1";
+      description = ''
+        Where the SSH shell sees the files that the SFTP session serves
+        (`--sftp-path-override`).
+
+        The SFTP backend has no hash primitive of its own: to checksum a file
+        it opens a *second* SSH channel and runs `md5sum <path>` there. Any
+        server that jails SFTP to a virtual root — a Synology or QNAP NAS, a
+        chrooted OpenSSH account, a containerised SFTP service — hands the
+        shell a different filesystem than the SFTP session, so that command
+        fails on paths that transfer perfectly well:
+
+        ```
+        ERROR : Legal/Scholars Fund.pdf: Failed to calculate src hash:
+          failed to calculate md5 hash: failed to run "md5sum /document/Legal/...":
+          md5sum: '/document/Legal/...': No such file or directory
+        ```
+
+        Note that `md5sum` itself ran: the path simply does not exist outside
+        the jail. This option supplies the translation.
+
+        Prefix the value with `@` to give only the *root* and let rclone
+        append the remote's own path — the setting then stays correct when
+        that path changes. A share served as `remote:/document` that really
+        lives at `/volume1/document` needs nothing more than `@/volume1`.
+        Without the `@`, the value must spell out the full shell path
+        corresponding to the remote's root, and has to be restated per remote
+        path.
+
+        Leave null when shell and SFTP agree on paths, as they do for an
+        ordinary OpenSSH account over a real home directory.
+      '';
+    };
+
+    disableHashcheck = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Stop asking the server for checksums at all
+        (`--sftp-disable-hashcheck`).
+
+        The fallback for a server where `pathOverride` cannot help: no shell
+        access, no `md5sum` on it, or a path mapping that is not a fixed
+        prefix. Both sides are then left with no hash in common and rclone
+        compares size and modtime instead — bisync says so once per run
+        ("falling back to --compare modtime,size") and carries on, so
+        `--compare size,modtime,checksum` in `baseArgs` can stay as it is.
+
+        Prefer `pathOverride` where it applies: it keeps the checksums, and
+        with them bisync's ability to tell a real change from a file that
+        merely has the same size and a rewritten modtime.
+      '';
+    };
+  };
+
+  # ── Shared option: filters ────────────────────────────────────────────
+  excludesOption = mkOption {
+    type = types.listOf types.str;
+    default = [ "#recycle/**" ];
+    example = [
+      "#recycle/**"
+      "@eaDir/**"
+    ];
+    description = ''
+      Patterns to keep out of the transfer, passed as rclone `--exclude`.
+
+      The default covers `#recycle`, the per-share recycle bin a Synology NAS
+      keeps at the root of every shared folder: it holds exactly the files
+      somebody already decided to throw away, and syncing it doubles their
+      cost forever. A Synology also scatters `@eaDir` thumbnail directories
+      through every folder — add `"@eaDir/**"` if you are indexing media.
+
+      Note when changing this on an existing bisync pair: rclone only forces a
+      `--resync` when a `--filters-file` changes, and these are plain
+      `--exclude` flags, so nothing forces one here. Newly excluded files drop
+      out of both listings at once, which bisync reads as "deleted on both
+      sides" and accepts without touching either disk — but if they are more
+      than half of the pair, `--max-delete` aborts the run instead ("Safety
+      abort: too many deletes"). Recover by resyncing: remove the listings
+      under `<home>/.cache/rclone/bisync/` and start
+      `rclone-bisync-<name>-init.service`.
+
+      Excluding a directory stops it syncing; it does not remove a copy an
+      earlier run already made.
+    '';
+  };
+
   # ── Submodule: live FUSE mount ────────────────────────────────────────
   mountSubmodule = types.submodule {
     options = {
@@ -119,6 +212,10 @@ let
       };
 
       googleDrive = googleDriveOptions;
+
+      sftp = sftpOptions;
+
+      excludes = excludesOption;
     };
   };
 
@@ -281,6 +378,10 @@ let
       };
 
       googleDrive = googleDriveOptions;
+
+      sftp = sftpOptions;
+
+      excludes = excludesOption;
 
       markdownSync = {
         enable = mkEnableOption "bidirectional markdown/docx sync";
@@ -466,6 +567,28 @@ let
 
   # ── Builders ──────────────────────────────────────────────────────────
 
+  mkSftpMountOpts =
+    m:
+    optional m.sftp.disableHashcheck "sftp-disable-hashcheck"
+    ++ optional (m.sftp.pathOverride != null) "sftp-path-override=${m.sftp.pathOverride}";
+
+  mkSftpArgs =
+    s:
+    optional s.sftp.disableHashcheck "--sftp-disable-hashcheck"
+    ++ optionals (s.sftp.pathOverride != null) [
+      "--sftp-path-override"
+      s.sftp.pathOverride
+    ];
+
+  mkExcludeMountOpts = m: map (pat: "exclude=${pat}") m.excludes;
+
+  mkExcludeArgs =
+    s:
+    concatMap (pat: [
+      "--exclude"
+      pat
+    ]) s.excludes;
+
   mkGDriveMountOpts =
     m:
     optionals m.googleDrive.enable (
@@ -573,12 +696,9 @@ let
         "vfs-read-chunk-size=64M"
         "vfs-read-chunk-size-limit=512M"
         "buffer-size=64M"
-
-        # SFTP: disable remote hash checking (md5sum/sha1sum via SSH).
-        # The shell-escaping of special characters in remote paths is
-        # fragile and causes false "corrupted on transfer" errors.
-        "sftp-disable-hashcheck"
       ]
+      ++ mkSftpMountOpts m
+      ++ mkExcludeMountOpts m
       ++ optionals (m.configFile != null) [
         "x-systemd.requires=rclone-config.service"
         "x-systemd.after=rclone-config.service"
@@ -606,6 +726,8 @@ let
         "--conflict-loser"
         s.conflictLoser
       ]
+      ++ mkSftpArgs s
+      ++ mkExcludeArgs s
       ++ mkGDriveArgs s
       ++ s.extraArgs
       ++ optionals (s.configFile != null) [

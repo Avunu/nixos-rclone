@@ -229,6 +229,77 @@ a real size and md5, and bisync becomes fully deterministic. Note that rclone
 cannot update an *existing* native Doc without `--drive-import-formats`, so a
 folder that already contains Google Docs must be migrated first.
 
+## SFTP remotes
+
+The SFTP backend has no hash primitive of its own. When rclone wants a checksum
+it opens a *second* SSH channel and runs `md5sum <path>` on the server, then
+parses the output. That works only if the shell sees the same files, under the
+same names, as the SFTP session — and a server that jails SFTP to a virtual
+root does not give you that. A Synology NAS is the usual case: it serves a
+share as `/document` over SFTP while the shell knows it as
+`/volume1/document`. Files that transfer perfectly well then fail their hash
+check on every run:
+
+```
+ERROR : Home & Family/.../Keystone Scholars Fund.pdf: Failed to calculate src hash:
+  failed to calculate md5 hash: failed to run "md5sum /document/Home\ \&\ Family/...":
+  md5sum: '/document/Home & Family/...': No such file or directory
+```
+
+Note that `md5sum` itself ran fine, and that the path it printed is correctly
+unescaped — it just does not exist outside the jail. Nothing installed locally
+changes that. Give rclone the translation instead:
+
+```nix
+services.rclone-remotes.bisyncs.documents = {
+  remote = "nas:/document";
+  localPath = "/home/kevin/Documents";
+  sftp.pathOverride = "@/volume1";
+};
+```
+
+The leading `@` means "this is only the root" — rclone appends the remote's own
+path itself, so `nas:/document` is looked up as `/volume1/document` and the
+setting survives a change of remote path. Without the `@` the value has to
+spell out the full shell path corresponding to the remote's root. The mechanism
+is rclone's generic `--sftp-path-override`; nothing about it is Synology-
+specific, and it applies equally to a chrooted OpenSSH account or a
+containerised SFTP service. Leave it unset for an ordinary account over a real
+home directory.
+
+Where the shell cannot be made to reach the files at all — no shell access, no
+`md5sum` on it, or a mapping that is not a fixed prefix — fall back to
+`sftp.disableHashcheck = true`. Both sides are then left with no hash in
+common and rclone compares size and modtime instead; bisync notes the fallback
+once per run and continues, so `--compare size,modtime,checksum` in `baseArgs`
+can stay as it is. Prefer `pathOverride` where it applies: real checksums are
+what let bisync tell a genuine change from a file that merely has the same size
+and a rewritten modtime.
+
+## Excluding paths
+
+`excludes` is a list of rclone `--exclude` patterns, applied to both mounts and
+bisyncs. It defaults to `[ "#recycle/**" ]` — the per-share recycle bin a
+Synology keeps at the root of every shared folder, which holds exactly the
+files somebody already decided to throw away. Add `"@eaDir/**"` if the same NAS
+is indexing media into thumbnail directories.
+
+Changing this on an established bisync pair needs a moment's care. rclone only
+forces a `--resync` when a `--filters-file` changes, and these are plain
+`--exclude` flags, so nothing forces one here. Newly excluded files drop out of
+both listings at once, which bisync reads as "deleted on both sides" and
+accepts without touching either disk — but if they come to more than half the
+pair, `--max-delete` aborts the run instead:
+
+```
+ERROR : Safety abort: too many deletes (>50%, 3 of 4) on Path1 "...". Run with --force if desired.
+```
+
+Nothing is deleted when that happens; the run simply stops. Recover by
+resyncing the pair — remove the listings under `~/.cache/rclone/bisync/` and
+start `rclone-bisync-<name>-init.service`. Note also that excluding a directory
+stops it syncing but does not remove a copy an earlier run already made.
+
 ## Options reference
 
 ### Top-level
@@ -261,6 +332,9 @@ folder that already contains Google Docs must be migrated first.
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict mount to a specific Drive folder ID |
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs/Sheets/Slides as |
 | `googleDrive.importFormats` | string | `"docx"` | Formats to import when writing back to Drive |
+| `sftp.pathOverride` | string or null | `null` | Path the SSH shell sees for the SFTP root, so checksums work through an SFTP jail (see above) |
+| `sftp.disableHashcheck` | bool | `false` | Give up on SFTP checksums entirely; fallback for when `pathOverride` cannot help |
+| `excludes` | list of strings | `["#recycle/**"]` | `--exclude` patterns; defaults to the Synology recycle bin (see above) |
 
 ### Upgrading
 
@@ -280,6 +354,17 @@ coming from an earlier revision:
   `settlePass.delay` seconds per run, which is wasted on any backend that stores
   modtimes faithfully (SFTP, WebDAV, local); set `settlePass.enable = false`
   there.
+
+Two more since:
+
+- **Mounts no longer force `--sftp-disable-hashcheck`.** It used to be
+  hardcoded, which silently gave up checksums on every SFTP mount; it is now
+  `sftp.disableHashcheck`, off by default. If your SFTP server jails the SFTP
+  session away from the shell, set `sftp.pathOverride` (the real fix) or turn
+  the flag back on — otherwise the hash failures it was hiding will surface.
+- **`excludes` defaults to `[ "#recycle/**" ]`.** On an established bisync pair
+  those files leave both listings at once, which is harmless, but see
+  [Excluding paths](#excluding-paths) for the `--max-delete` case.
 
 ### `bisyncs.<name>`
 
@@ -303,6 +388,9 @@ coming from an earlier revision:
 | `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
 | `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
 | `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
+| `sftp.pathOverride` | string or null | `null` | Path the SSH shell sees for the SFTP root, so checksums work through an SFTP jail (see above) |
+| `sftp.disableHashcheck` | bool | `false` | Give up on SFTP checksums entirely; fallback for when `pathOverride` cannot help |
+| `excludes` | list of strings | `["#recycle/**"]` | `--exclude` patterns; defaults to the Synology recycle bin (see above) |
 | `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
 | `markdownSync.path` | string | — | Markdown/vault directory |
 | `markdownSync.syncDeletions` | bool | `true` | Propagate deletions (without it, a deletion is undone on the next run) |
