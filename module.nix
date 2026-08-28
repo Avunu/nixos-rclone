@@ -130,7 +130,16 @@ let
   # ── Shared option: filters ────────────────────────────────────────────
   excludesOption = mkOption {
     type = types.listOf types.str;
-    default = [ "#recycle/**" ];
+    default = [
+      ".AppleDouble"
+      ".DS_Store"
+      ".Spotlight-V100"
+      ".Trashes"
+      "@eaDir/**"
+      "#recycle/**"
+      "$RECYCLE.BIN/**"
+      "Thumbs.db"
+    ];
     example = [
       "#recycle/**"
       "@eaDir/**"
