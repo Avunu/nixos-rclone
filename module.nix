@@ -696,6 +696,23 @@ let
         "dir-cache-time=5m"
         "vfs-cache-max-age=24h"
 
+        # A mount runs --daemon, so rclone's stdout/stderr go nowhere: without
+        # this, every error it raises after the mount is up is lost. That is
+        # exactly the wrong thing to lose, because with vfs-cache-mode=full the
+        # upload happens *after* the writing program has already closed the file
+        # and walked away — nothing is left to return the error to. A failing
+        # writeback is therefore completely silent, and the mount keeps serving
+        # the local cache copy, so the file still looks present and correct on
+        # the mount while the remote never receives it.
+        #
+        # One such failure (a wrong --sftp-path-override, which makes md5sum
+        # return an empty hash that rclone reads as "corrupted on transfer")
+        # deleted every upload to a share and retried on the writeback cycle for
+        # twenty months undetected, leaving 33k discarded .partial files in the
+        # NAS recycle bin as the only evidence. Keep the default NOTICE level:
+        # ERROR-level events still reach the journal, without logging traffic.
+        "syslog"
+
         # Network & performance safeguards
         "transfers=4"
         "multi-thread-streams=4"
