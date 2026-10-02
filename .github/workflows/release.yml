@@ -1,0 +1,91 @@
+# Tag `vX.Y.Z` to publish a release. The tag must match the version in
+# Cargo.toml; the binary is built for both architectures, pushed to the binary
+# cache, and a GitHub Release is created with generated notes.
+#
+# Like the cache job in checks.yml, this only runs from a ref a maintainer
+# created, never from pull-request code, because it holds CACHIX_AUTH_TOKEN.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CACHIX_CACHE: nixos-rclone
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tag matches Cargo.toml
+        run: |
+          set -euo pipefail
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "v$crate" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version v$crate"
+            exit 1
+          fi
+
+  build:
+    needs: verify
+    name: build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          skipPush: true
+      - name: Build
+        run: nix build -L -o result '.#packages.${{ matrix.system }}.default'
+      - name: Publish to Cachix
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          nix path-info --json --recursive ./result \
+            | jq 'if type == "array" then .
+                  elif has("info") then .storeDir as $d | .info | to_entries
+                    | map({path: ($d + "/" + .key)} + .value)
+                  else to_entries | map({path: .key} + .value) end' \
+            | jq -r '.[] | select((.signatures // []) | length == 0) | .path' \
+            | sort -u | xargs -r cachix push "$CACHIX_CACHE"
+      - name: Stage the binary
+        run: |
+          install -D result/bin/rclone-remotes "dist/rclone-remotes-${{ matrix.system }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rclone-remotes-${{ matrix.system }}
+          path: dist/rclone-remotes-${{ matrix.system }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

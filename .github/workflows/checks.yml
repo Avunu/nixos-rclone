@@ -1,0 +1,210 @@
+# CI for pull requests and main.
+#
+# Three jobs, patterned on nixos-router:
+#
+#   fast   build + unit/integration tests (the package's checkPhase), clippy,
+#          rustfmt and cargo-deny, on x86_64 AND aarch64 (native runners).
+#   vm     the NixOS VM tests. x86_64 only: it needs KVM, which the arm runners
+#          do not offer.
+#   cache  builds the daemon and publishes what cache.nixos.org cannot serve to
+#          the project's Cachix cache.
+#
+# Make "fast (x86_64-linux)", "fast (aarch64-linux)" and "vm" required status
+# checks in the `main` ruleset: Dependabot PRs auto-merge once they pass
+# (dependabot-auto-merge.yml), so these are the whole gate between a dependency
+# bump and everyone who consumes the module.
+#
+# `cache` publishes only from `main` and never from a pull request. Whoever
+# holds CACHIX_AUTH_TOKEN can upload a signed NAR under ANY store path, and
+# input-addressed paths are not checked against their contents, so a token
+# exposed to pull-request code could plant a path that consumers then
+# substitute as trusted. Keep the token in Actions secrets only; it does not
+# belong in the Dependabot secret store.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Nightly: keeps the Actions cache warm, republishes whatever an earlier run
+  # could not push, and notices a flake-input or advisory-db drift no commit
+  # caused.
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# magic-nix-cache-action needs id-token: write to scope its GitHub Actions
+# cache entries; nothing else in this workflow needs more than read.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CACHIX_CACHE: nixos-rclone
+
+jobs:
+  fast:
+    name: fast (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `determinate: false`: nothing here needs Determinate-only nixConfig, and
+      # the default has the installer try to log into FlakeHub on a repo that
+      # isn't registered there.
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+
+      # The package build runs `cargo test` (unit + integration, with rclone
+      # available) in its checkPhase; clippy and rustfmt reuse the same
+      # vendored dependencies.
+      - name: Package (cargo test), clippy, rustfmt
+        run: |
+          nix build --no-link -L \
+            '.#checks.${{ matrix.system }}.rclone-remotes' \
+            '.#checks.${{ matrix.system }}.clippy' \
+            '.#checks.${{ matrix.system }}.rustfmt'
+
+      # Not a flake check: the advisory database has to be fetched, which the
+      # build sandbox cannot do.
+      - name: cargo-deny (advisories, licences, bans, sources)
+        run: nix develop -c cargo deny check
+
+  vm:
+    name: vm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # NixOS VM tests need /dev/kvm, which is present on Linux runners but not
+      # world-accessible by default.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+      - name: nix flake check
+        run: nix flake check -L
+
+  cache:
+    name: cache (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          # flake.nix declares the project cache in `nixConfig`; accepting it
+          # lets a run PULL what an earlier revision already published.
+          extra-conf: |
+            accept-flake-config = true
+            # This job exists to notice when something stops being cached;
+            # it must never trust a remembered "that path is missing".
+            narinfo-cache-negative-ttl = 0
+
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+
+      # Installs the `cachix` binary and configures the cache as a substituter.
+      # Pushing is deliberately NOT delegated to this action: its daemon mode
+      # registers a post-build hook, which magic-nix-cache above already owns,
+      # and would push every path built during the job. The explicit push below
+      # sends the runtime closure instead.
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          skipPush: true
+
+      - name: Build the daemon
+        run: nix build -L -o result '.#packages.${{ matrix.system }}.default'
+
+      # What only we can serve. A path that arrived from any cache carries that
+      # cache's signature, so an EMPTY `signatures` array is the set
+      # cache.nixos.org cannot provide. `nix path-info --json` has had three
+      # shapes (array; object keyed by store path; `{info, storeDir}` for
+      # `--json-format 2`); normalise all three so this works on any runner Nix.
+      - name: Determine what cache.nixos.org cannot serve
+        run: |
+          set -euo pipefail
+          nix path-info --json --recursive ./result \
+            | jq 'if type == "array" then .
+                  elif has("info") then .storeDir as $d | .info | to_entries
+                    | map({path: ($d + "/" + .key)} + .value)
+                  else to_entries | map({path: .key} + .value) end' \
+            | jq -r '.[] | select((.signatures // []) | length == 0) | .path' \
+            | sort -u > unsigned.txt
+          echo "$(grep -c . unsigned.txt || true) paths only this cache can serve:"
+          sed 's|^/nix/store/[a-z0-9]*-|  |' unsigned.txt
+
+      # Never on a pull request (see the header). `continue-on-error`, because
+      # a cache is an optimisation: a failed push must not turn a green build
+      # red; the nightly run publishes what this one could not.
+      - name: Publish to Cachix
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
+            echo "::warning::CACHIX_AUTH_TOKEN is empty on this run, so nothing was published."
+            exit 0
+          fi
+          xargs -r cachix push "$CACHIX_CACHE" < unsigned.txt
+
+      - name: Report what this revision costs the cache
+        if: always() && hashFiles('unsigned.txt') != ''
+        run: |
+          set -euo pipefail
+          total=0
+          rows=""
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            n="$(nix-store --dump "$p" | zstd -19 -T0 | wc -c)"
+            total=$((total + n))
+            rows="${rows}| \`$(basename "$p")\` | $(numfmt --to=iec "$n") |"$'\n'
+          done < unsigned.txt
+          {
+            echo "## Binary-cache cost of this revision (${{ matrix.system }})"
+            echo
+            echo "| Store path | Compressed |"
+            echo "|---|---:|"
+            printf '%s' "$rows"
+            echo "| **Total** | **$(numfmt --to=iec "$total")** |"
+            echo
+            echo "Cachix's open-source tier is 5 GB and collects least-recently-used first."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,11 +1,51 @@
 # rclone-nixos-module
 
-A NixOS module providing:
+A NixOS module, backed by a small Rust daemon (`rclone-remotes`), providing:
 
 - **Live FUSE mounts** via `fileSystems` with systemd automount (lazy, on-demand)
-- **Bidirectional sync** (`rclone bisync`) on a timer with optional pandoc markdown↔docx conversion
+- **Bidirectional sync** (`rclone bisync`) where **local changes are pushed the
+  moment they happen** — created, edited, renamed and deleted files reach the
+  remote within seconds — and remote changes are pulled on a timer
+- **Markdown ↔ docx conversion** built in (no pandoc), for editing an Obsidian
+  vault as Google Docs, with moves and renames followed as renames
 - **Suspend/resume recovery** that resets failed mounts after waking from sleep
 - **Automatic directory creation** via systemd tmpfiles
+
+## How it works
+
+Each bisync pair is one long-running service, `rclone-bisync-<name>.service`,
+that talks to a private `rclone rcd` over rclone's remote-control API:
+
+```
+ local files ──inotify──▶  rclone-remotes  ──rc API──▶  rclone rcd ──▶ remote
+       ▲                    │  ▲                             
+       └──── pull timer ────┘  └── markdown ⇄ docx (carta)
+```
+
+- **Pushing.** A watcher notices changes under `localPath`, waits for the tree
+  to be quiet (`push.debounce`), then uploads new and modified files, applies
+  deletions, and turns a rename into a **server-side move** — so a Google Drive
+  document keeps its file ID, sharing and history. bisync's listings are
+  patched to match, so the next pull reads the rename as the same file at a new
+  path instead of replaying it as delete + create.
+- **Pulling.** rclone offers no way to subscribe to remote changes, so the
+  remote is polled with `rclone bisync` every `pull.interval`. This is also the
+  safety net for anything the watcher missed.
+- **First run.** A pair that has never synced is initialised by the daemon
+  itself (a `--resync`, keeping the newer copy). Nothing is pushed until then.
+- **Safety.** A burst of deletions (a vault unmounted, a folder emptied) is
+  withheld from pushing and left to the pull, whose `maxDelete` check judges
+  it. A bisync that locks itself out after a critical error is *not* resynced
+  automatically; the daemon reports it and waits for you.
+
+Inspect or nudge a running pair with the `rclone-remotes` command the module
+installs (run as the pair's user, or root):
+
+```
+rclone-remotes ctl --name documents status   # state, last success, push counters
+rclone-remotes ctl --name documents sync     # pull now, and wait for it
+rclone-remotes ctl --name documents resync   # rebuild the listings (--resync)
+```
 
 ## Installation
 
@@ -75,18 +115,16 @@ in
         remote = "webdav:ssh";
         localPath = "${home}/.ssh";
         dirPerms = "0700";
-        interval = "15min";
-        onBootSec = "2min";
-        # appended to baseArgs, not a replacement for it
-        extraArgs = [
-          "--checksum"
-          "--links"
-        ];
+        pull.interval = "15min";
+        pull.onBoot = "2min";
+        # extra rclone `sync/bisync` parameters, merged over the typed options
+        extraParams.ignoreListingChecksum = true;
       };
       fonts = {
         remote = "webdav:font";
         localPath = "${home}/.local/share/fonts";
-        interval = "1h";
+        pull.interval = "1h";
+        push.enable = false;     # fonts only ever change on the server
       };
       gdocs = {
         remote = "gdrive:Documents";
@@ -105,7 +143,8 @@ in
 
 ## Markdown sync (Obsidian ↔ Google Drive)
 
-Bisync pairs can optionally convert between markdown and docx before/after each sync. This is useful for editing Obsidian vault files as Google Docs:
+A bisync pair can convert between a directory of markdown notes and the docx
+files it syncs. This is useful for editing an Obsidian vault as Google Docs:
 
 ```nix
 services.rclone-remotes.bisyncs.obsidian = {
@@ -113,7 +152,7 @@ services.rclone-remotes.bisyncs.obsidian = {
   localPath = "/home/user/.obsidian-docx";
   configFile = "/etc/rclone.conf";
   user = "user";
-  interval = "5min";
+  pull.interval = "5min";
 
   googleDrive = {
     enable = true;
@@ -124,60 +163,62 @@ services.rclone-remotes.bisyncs.obsidian = {
     enable = true;
     path = "/home/user/ObsidianVault";
     # syncDeletions and trackMoves are on by default
-    mdToDocxArgs = [ "--reference-doc=/home/user/template.docx" ];
-    docxToMdArgs = [ "--wrap=none" "--extract-media=./media" ];
+    referenceDoc = /home/user/template.docx;   # optional: styles for new documents
   };
 };
 ```
 
-When markdown sync is enabled:
+The conversion is done in the daemon with the [carta](https://github.com/mfkrause/carta)
+library; pandoc is not used. Both directions keep the notes round-tripping
+exactly: markdown → docx strips heading ids and makes tight lists loose (so
+Google Docs renders each item as a paragraph); docx → markdown makes them tight
+again and writes unwrapped lines.
 
-1. **Pre-sync**: Moves/renames made in `path` are mirrored onto `localPath` and the remote, then newer markdown files are converted to docx and placed there
-2. **Rclone bisync** runs between `localPath` and the remote
-3. **Post-sync**: Moves/renames that arrived from the remote are mirrored onto `path`, then newer docx files are converted back to markdown
+With markdown sync enabled:
 
-The optional args are passed through to the Pandoc CLI, which facilitates the conversion process.
+- **A note is edited, created, renamed or deleted in the vault** → the daemon
+  converts it at once, and the docx change is pushed like any other local
+  change. A rename of a note renames its docx, and from there the remote file.
+- **Before each pull**, the vault is reconciled as a whole, which also catches
+  anything that happened while the daemon was not running.
+- **After each pull**, documents that changed on the remote are converted back
+  to notes, and moves made on the remote move the notes.
+
+Conversion decides by modification time, and copies the source's time onto its
+output, so a converted pair compares equal and nothing is converted twice.
+Hidden files and folders (`.obsidian`, `.trash`) are never touched. Each note's
+own previous docx is the reference for its styling, so formatting applied in
+Google Docs survives later edits; `referenceDoc` styles a note's first
+conversion.
+
+Not carried across, as before: Obsidian wikilinks and callouts come back
+escaped, and images are not embedded.
 
 ### Moves and renames
 
-The two trees are matched by path, so relocating or renaming a file on one side
-reads as "deleted here, created there" on the other. Left alone, the stale
-counterpart regenerates the document at its old path on the next run, so the
-move never sticks and the file ends up at **both** paths, in **both** trees,
-permanently. rclone bisync cannot help: it has no rename tracking and models
-every move as delete + create.
+The vault and the docx tree are matched by path, so relocating or renaming a
+note reads as "deleted here, created there". Left alone, the stale counterpart
+regenerates the document at its old path and the file ends up at **both**
+paths, permanently. rclone bisync cannot help: it has no rename tracking.
 
-`markdownSync.trackMoves` (on by default) closes this. An orphaned file is
-paired with a newly-appeared one and moved to match, using three passes:
+`markdownSync.trackMoves` (on by default) pairs the orphaned file with the
+newly appeared one and moves it to match, in three passes:
 
-- **identity** — the markdown file's inode and birth time, recorded at the end
-  of every run. A rename keeps both however much the file was edited, so this
-  catches a note that was renamed *and* edited before the next run. It applies
-  to moves made in `path` only: the docx side is regenerated or re-downloaded,
-  so its identity means nothing.
-- **basename** — survives a relocation, even if the file was edited in transit
+- **identity** — the note's inode and birth time, which a rename keeps however
+  much the note was edited. This catches a note that was renamed *and* edited.
+- **basename** — survives a relocation, even if the note was edited in transit
 - **mtime** — survives a rename, which changes the basename but not the
-  timestamp (a Drive move rewrites `parents`, not `modifiedTime`)
+  timestamp
 
-Only unambiguous 1:1 matches are acted on; anything else is logged as an
-unpaired orphan/new file and then handled as a plain delete + create, as are
-genuine creates and deletes. Whole-directory moves work, since their members
-pair individually.
+Only unambiguous 1:1 matches are acted on, and never onto an existing path.
+Whole-folder moves work. The same identity check recovers a rename the watcher
+only saw half of (`mkdir new && mv old new/`).
 
-A move made in `path` is also carried through to the remote, as a server-side
-move. Moving only the local docx is not enough: bisync would still replay it on
-the remote as delete + create, and on Google Drive that gives the document a
-new file ID, sending the original to the trash along with its sharing,
-comments, revision history and every link to it. rclone's own `--track-renames`
-cannot help here, because it pairs files by size and an imported Google Doc
-reports none. So the pre-sync hook renames the file on the remote with
-`rclone moveto` and updates bisync's listings to match. bisync then sees the
-same file at its new path, and uploads any edit to it in place. If the remote
-cannot be reached, the hook stops that run before anything changes, and the
-rename is retried on the next one.
-
-Deletions are handled by `syncDeletions`, which runs *after* this pass so that
-only genuine deletions reach it.
+A move made in the vault is carried to the remote *before* the next pull as a
+server-side move; if the remote cannot be reached the pull waits and the rename
+is retried (and survives a restart), rather than being replayed as delete +
+create. `syncDeletions` runs after move tracking, so only genuine deletions
+reach it, and an empty or unmounted side is never propagated.
 
 ## Google Drive integration
 
@@ -206,10 +247,10 @@ This passes `drive-export-formats` and `drive-import-formats` as FUSE mount opti
 
 For bisync pairs, `googleDrive.enable = true` additionally applies:
 
-- `--fix-case` — handle Drive's case-insensitive filesystem
-- `--slow-hash-sync-only` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
+- `fix_case` — handle Drive's case-insensitive filesystem
+- `slowHashSyncOnly` — limit checksum computation to files where size+modtime already match, avoiding expensive full-file hashes on every sync
 
-> **Bisyncing native Google Docs needs `settlePass`.** With `importFormats`
+> **Bisyncing native Google Docs needs the settle pass.** With `importFormats`
 > set (the default), every uploaded `.docx` is converted into a *native Google
 > Doc*. Native Docs report `Size: -1` and no checksum, so modtime is the only
 > change signal bisync has for the remote — and Drive rewrites it itself when
@@ -218,7 +259,8 @@ For bisync pairs, `googleDrive.enable = true` additionally applies:
 > even though nobody touched it. Alone that is harmless. But if the local side
 > also changed in that window, bisync sees both sides as changed, declares a
 > conflict, and drops a `.conflictN` file — on every run, for as long as you
-> keep editing locally. `settlePass` closes the window and is on by default.
+> keep editing locally. `settle` closes the window and is on by default; it
+> also runs after a burst of pushed changes, once `settle.delay` has passed.
 
 ```nix
 services.rclone-remotes.bisyncs.gdocs = {
@@ -226,9 +268,9 @@ services.rclone-remotes.bisyncs.gdocs = {
   localPath = "/home/user/GoogleDrive";
   configFile = "/etc/rclone.conf";
 
-  # settlePass, conflictResolve = "newer" and conflictLoser = "delete" are
+  # settle, conflict.resolve = "newer" and conflict.loser = "delete" are
   # all defaults, so nothing extra is needed here. Prefer keeping losers?
-  #   conflictLoser = "num";
+  #   conflict.loser = "num";
 
   googleDrive = {
     enable = true;
@@ -287,7 +329,7 @@ Where the shell cannot be made to reach the files at all — no shell access, no
 `md5sum` on it, or a mapping that is not a fixed prefix — fall back to
 `sftp.disableHashcheck = true`. Both sides are then left with no hash in
 common and rclone compares size and modtime instead; bisync notes the fallback
-once per run and continues, so `--compare size,modtime,checksum` in `baseArgs`
+once per run and continues, so `compare = "size,modtime,checksum"`
 can stay as it is. Prefer `pathOverride` where it applies: real checksums are
 what let bisync tell a genuine change from a file that merely has the same size
 and a rewritten modtime.
@@ -295,14 +337,15 @@ and a rewritten modtime.
 ## Excluding paths
 
 `excludes` is a list of rclone `--exclude` patterns, applied to both mounts and
-bisyncs. It defaults to `[ "#recycle/**" ]` — the per-share recycle bin a
+bisyncs (and honoured by the watcher exactly as rclone itself would, so an
+excluded file is never pushed). It defaults to `[ "#recycle/**" ]` — the per-share recycle bin a
 Synology keeps at the root of every shared folder, which holds exactly the
 files somebody already decided to throw away. Add `"@eaDir/**"` if the same NAS
 is indexing media into thumbnail directories.
 
 Changing this on an established bisync pair needs a moment's care. rclone only
 forces a `--resync` when a `--filters-file` changes, and these are plain
-`--exclude` flags, so nothing forces one here. Newly excluded files drop out of
+exclude patterns, so nothing forces one here. Newly excluded files drop out of
 both listings at once, which bisync reads as "deleted on both sides" and
 accepts without touching either disk — but if they come to more than half the
 pair, `--max-delete` aborts the run instead:
@@ -312,8 +355,7 @@ ERROR : Safety abort: too many deletes (>50%, 3 of 4) on Path1 "...". Run with -
 ```
 
 Nothing is deleted when that happens; the run simply stops. Recover by
-resyncing the pair — remove the listings under `~/.cache/rclone/bisync/` and
-start `rclone-bisync-<name>-init.service`. Note also that excluding a directory
+resyncing the pair: `rclone-remotes ctl --name <name> resync`. Note also that excluding a directory
 stops it syncing but does not remove a copy an earlier run already made.
 
 ## Options reference
@@ -352,36 +394,6 @@ stops it syncing but does not remove a copy an earlier run already made.
 | `sftp.disableHashcheck` | bool | `false` | Give up on SFTP checksums entirely; fallback for when `pathOverride` cannot help |
 | `excludes` | list of strings | `["#recycle/**"]` | `--exclude` patterns; defaults to the Synology recycle bin (see above) |
 
-### Upgrading
-
-Three defaults changed once native-Google-Docs support was fixed. If you are
-coming from an earlier revision:
-
-- **`extraArgs` is now additive**, appended to `baseArgs` rather than replacing
-  it. If you had copied the old default list into `extraArgs` just to add a flag,
-  delete the copy and keep only your additions — otherwise you will pass some
-  flags twice. To *drop* one of the defaults, set `baseArgs` instead.
-- **Conflict handling moved out of `extraArgs`** into `conflictResolve` and
-  `conflictLoser`. Note `conflictLoser` defaults to `delete`, which discards the
-  losing copy; set it to `"num"` for rclone's keep-everything behaviour.
-- **`markdownSync.syncDeletions` and `settlePass.enable` now default to `true`.**
-  The first means deletions actually propagate — including ones you had been
-  relying on *not* propagating. The second costs a second listing pass plus
-  `settlePass.delay` seconds per run, which is wasted on any backend that stores
-  modtimes faithfully (SFTP, WebDAV, local); set `settlePass.enable = false`
-  there.
-
-Two more since:
-
-- **Mounts no longer force `--sftp-disable-hashcheck`.** It used to be
-  hardcoded, which silently gave up checksums on every SFTP mount; it is now
-  `sftp.disableHashcheck`, off by default. If your SFTP server jails the SFTP
-  session away from the shell, set `sftp.pathOverride` (the real fix) or turn
-  the flag back on — otherwise the hash failures it was hiding will surface.
-- **`excludes` defaults to `[ "#recycle/**" ]`.** On an established bisync pair
-  those files leave both listings at once, which is harmless, but see
-  [Excluding paths](#excluding-paths) for the `--max-delete` case.
-
 ### `bisyncs.<name>`
 
 | Option | Type | Default | Description |
@@ -389,43 +401,68 @@ Two more since:
 | `remote` | string | — | Rclone remote path |
 | `localPath` | string | — | Local directory to sync |
 | `configFile` | string or null | global default | Rclone config file path (`null` = rclone's default) |
-| `user` | string | global default | User to run sync as |
-| `group` | string | global default | Group for service |
+| `user` | string | global default | User to run the service as |
+| `group` | string | global default | Group for the service |
 | `dirPerms` | string | `"0755"` | Directory permissions |
-| `interval` | string | `"15min"` | Re-sync interval |
-| `onBootSec` | string | `"5min"` | Delay before first sync |
-| `baseArgs` | list of strings | see below | Base `rclone bisync` arguments; replace to drop a default |
-| `extraArgs` | list of strings | `[]` | Additional arguments, appended to `baseArgs` |
-| `conflictResolve` | enum | `"newer"` | Which side wins a conflict (`--conflict-resolve`) |
-| `conflictLoser` | enum | `"delete"` | What happens to the losing copy: `num`, `pathname` or `delete` |
-| `settlePass.enable` | bool | `true` | Run a second bisync pass to reconcile remotes that rewrite modtimes after upload (see Google Drive above); turn off for SFTP/WebDAV/local |
-| `settlePass.delay` | int | `30` | Seconds between the two passes |
-| `googleDrive.enable` | bool | `false` | Apply Google Drive-specific flags |
-| `googleDrive.rootFolderId` | string or null | `null` | Restrict sync to a specific Drive folder ID |
-| `googleDrive.exportFormats` | string | `"docx"` | Formats to export Google Docs as |
-| `googleDrive.importFormats` | string | `"docx"` | Formats to import into Google Docs |
-| `sftp.pathOverride` | string or null | `null` | Path the SSH shell sees for the SFTP root, so checksums work through an SFTP jail (see above) |
-| `sftp.disableHashcheck` | bool | `false` | Give up on SFTP checksums entirely; fallback for when `pathOverride` cannot help |
-| `excludes` | list of strings | `["#recycle/**"]` | `--exclude` patterns; defaults to the Synology recycle bin (see above) |
+| `workdir` | string | `~/.cache/rclone/bisync` | Where bisync keeps its listings (the default is rclone's own, so existing pairs are not resynced) |
+| `push.enable` | bool | `true` | Watch `localPath` and push changes as they happen |
+| `push.debounce` | string | `"2s"` | How long the tree must be quiet before a burst of changes is pushed |
+| `pull.interval` | string | `"15min"` | How often to pull remote changes |
+| `pull.onBoot` | string | `"5min"` | Delay before the first pull after start |
+| `pull.jitter` | string | `"5min"` | Random delay added to each pull |
+| `conflict.resolve` | enum | `"newer"` | Which side wins a conflict |
+| `conflict.loser` | enum | `"delete"` | What happens to the losing copy: `num`, `pathname` or `delete` |
+| `compare` | string | `"size,modtime,checksum"` | How two files are judged equal |
+| `resilient` / `recover` / `createEmptySrcDirs` | bool | `true` | The matching bisync options |
+| `maxLock` | string | `"5m"` | How long a crashed run's lock is honoured |
+| `maxDelete` | null or 0–100 | `null` | Abort if more than this percent would be deleted (null = rclone's 50) |
+| `extraParams` | attrs | `{}` | Extra parameters for rclone's `sync/bisync`, merged over the above |
+| `settle.enable` | bool | `true` | Run a second pass after a pull and after pushed changes, to reconcile remotes that rewrite modtimes after upload (see Google Drive above); turn off for SFTP/WebDAV/local |
+| `settle.delay` | int | `30` | Seconds to wait before the second pass |
+| `googleDrive.*`, `sftp.*`, `excludes` | | | As for mounts |
 | `markdownSync.enable` | bool | `false` | Enable md↔docx conversion |
-| `markdownSync.path` | string | — | Markdown/vault directory |
+| `markdownSync.path` | path | — | Markdown/vault directory (must be separate from `localPath`) |
 | `markdownSync.syncDeletions` | bool | `true` | Propagate deletions (without it, a deletion is undone on the next run) |
-| `markdownSync.trackMoves` | bool | `true` | Follow moves/renames instead of duplicating them (see above) |
-| `markdownSync.mdToDocxArgs` | list of strings | `[]` | Extra args (md→docx) |
-| `markdownSync.docxToMdArgs` | list of strings | `["--wrap=none"]` | Extra args (docx→md) |
+| `markdownSync.trackMoves` | bool | `true` | Follow moves/renames instead of duplicating them |
+| `markdownSync.referenceDoc` | path or null | `null` | A docx whose styles a note's first conversion starts from |
 
-Default `baseArgs`:
-```nix
-[ "--verbose" "--resilient" "--recover" "--create-empty-src-dirs" "--max-lock" "5m" "--compare" "size,modtime,checksum" ]
-```
+Top level also has `package` (the `rclone-remotes` binary) and `rclonePackage`
+(the rclone used for mounts and the daemon's private `rcd`).
 
-The conflict flags are not in that list — they come from `conflictResolve` and
-`conflictLoser`, so changing conflict behaviour does not mean restating
-everything else. Final argument order is:
+### Upgrading from the script-based module
 
-```
-baseArgs ++ conflict flags ++ Google Drive flags ++ extraArgs
-```
+Bisync no longer runs `rclone bisync` from a timer; the options changed shape
+to match. Old names keep working as shims and print a deprecation warning that
+names the replacement:
+
+| Old | New |
+|-----|-----|
+| `interval`, `onBootSec` | `pull.interval`, `pull.onBoot` |
+| `conflictResolve`, `conflictLoser` | `conflict.resolve`, `conflict.loser` |
+| `settlePass.enable`, `settlePass.delay` | `settle.enable`, `settle.delay` |
+
+These no longer exist, and setting them is an error that says what to use
+instead:
+
+| Removed | Replacement |
+|---------|-------------|
+| `baseArgs` | the typed `compare`, `resilient`, `recover`, `createEmptySrcDirs`, `maxLock` |
+| `extraArgs` | `extraParams` (rclone rc parameters, not CLI flags) |
+| `markdownSync.mdToDocxArgs` | `markdownSync.referenceDoc` |
+| `markdownSync.docxToMdArgs` | none: markdown is always written unwrapped |
+
+Other things to know when upgrading:
+
+- **No timer and no `-init` unit.** `rclone-bisync-<name>.service` is a single
+  long-running service; `systemctl start` it to run it, `ctl sync` to pull now.
+  A pair with existing listings is not resynced.
+- **Local changes now arrive immediately.** If a pair should not do that,
+  set `push.enable = false`.
+- **pandoc is no longer needed** (or installed for this module).
+- Earlier changes still apply: `conflict.loser` defaults to `delete` (set
+  `"num"` to keep both copies), `markdownSync.syncDeletions` and
+  `settle.enable` default to `true`, mounts no longer force
+  `sftp.disableHashcheck`, and `excludes` defaults to `[ "#recycle/**" ]`.
 
 ## How FUSE mounts work
 
@@ -457,6 +494,35 @@ it lazily unmounts stale FUSE mounts (left behind when rclone dies uncleanly —
 "transport endpoint is not connected") and clears the failed state of exactly
 that mount's `.mount`/`.automount` units, so the next access transparently
 remounts. Healthy mounts are left untouched.
+
+## Binary cache
+
+The `rclone-remotes` daemon is a Rust program, built from the `Cargo.lock` in
+this repository. CI builds it for `x86_64-linux` and `aarch64-linux` and
+publishes the result to a public Cachix cache, so consumers need not compile
+it. The module is built with *your* `pkgs`, so cache hits need your nixpkgs to
+be this flake's locked one:
+
+```nix
+inputs.rclone-remotes.url = "github:Avunu/nixos-rclone";
+inputs.nixpkgs.follows = "rclone-remotes/nixpkgs";
+```
+
+The module enables the cache for you (`services.rclone-remotes.binaryCache.enable`,
+on by default); the flake's `nixConfig` does the same for building the flake
+itself. See `.github/workflows/checks.yml` for what CI pushes and why only from
+`main`.
+
+## Development
+
+```
+nix develop            # cargo, clippy, rustfmt, cargo-deny, rclone; installs git hooks
+cargo test             # unit tests, plus integration tests against a real rclone
+nix flake check        # package + tests, clippy, rustfmt, and the NixOS VM test
+```
+
+The integration tests (`tests/`) run the real daemon against a real
+`rclone rcd` over local directories, so `rclone` must be on `PATH`.
 
 ## License
 
