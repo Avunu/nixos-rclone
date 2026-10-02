@@ -132,7 +132,7 @@ services.rclone-remotes.bisyncs.obsidian = {
 
 When markdown sync is enabled:
 
-1. **Pre-sync**: Moves/renames made in `path` are mirrored onto `localPath`, then newer markdown files are converted to docx and placed there
+1. **Pre-sync**: Moves/renames made in `path` are mirrored onto `localPath` and the remote, then newer markdown files are converted to docx and placed there
 2. **Rclone bisync** runs between `localPath` and the remote
 3. **Post-sync**: Moves/renames that arrived from the remote are mirrored onto `path`, then newer docx files are converted back to markdown
 
@@ -148,17 +148,33 @@ permanently. rclone bisync cannot help: it has no rename tracking and models
 every move as delete + create.
 
 `markdownSync.trackMoves` (on by default) closes this. An orphaned file is
-paired with a newly-appeared one and moved to match, using two passes:
+paired with a newly-appeared one and moved to match, using three passes:
 
+- **identity** — the markdown file's inode and birth time, recorded at the end
+  of every run. A rename keeps both however much the file was edited, so this
+  catches a note that was renamed *and* edited before the next run. It applies
+  to moves made in `path` only: the docx side is regenerated or re-downloaded,
+  so its identity means nothing.
 - **basename** — survives a relocation, even if the file was edited in transit
 - **mtime** — survives a rename, which changes the basename but not the
   timestamp (a Drive move rewrites `parents`, not `modifiedTime`)
 
-Only unambiguous 1:1 matches are acted on; anything else is logged and left
-alone, as are genuine creates and deletes. Whole-directory moves work, since
-their members pair individually. A file both renamed *and* edited before the
-next run cannot be paired by either key — it is reported as an unpaired
-orphan/new pair for you to resolve.
+Only unambiguous 1:1 matches are acted on; anything else is logged as an
+unpaired orphan/new file and then handled as a plain delete + create, as are
+genuine creates and deletes. Whole-directory moves work, since their members
+pair individually.
+
+A move made in `path` is also carried through to the remote, as a server-side
+move. Moving only the local docx is not enough: bisync would still replay it on
+the remote as delete + create, and on Google Drive that gives the document a
+new file ID, sending the original to the trash along with its sharing,
+comments, revision history and every link to it. rclone's own `--track-renames`
+cannot help here, because it pairs files by size and an imported Google Doc
+reports none. So the pre-sync hook renames the file on the remote with
+`rclone moveto` and updates bisync's listings to match. bisync then sees the
+same file at its new path, and uploads any edit to it in place. If the remote
+cannot be reached, the hook stops that run before anything changes, and the
+rename is retried on the next one.
 
 Deletions are handled by `syncDeletions`, which runs *after* this pass so that
 only genuine deletions reach it.

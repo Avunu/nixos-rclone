@@ -437,8 +437,13 @@ let
             move as delete + create.
 
             With this on, an orphaned file is paired with a newly-appeared one
-            of the same basename and moved to match. Only unambiguous 1:1
-            pairings are followed; anything else is logged and left alone.
+            (by inode, basename or mtime) and moved to match. Only unambiguous
+            1:1 pairings are followed; anything else is logged and left alone.
+
+            A move made in the markdown directory is also performed on the
+            remote, as a server-side move, so a Google Drive document keeps its
+            file ID, sharing and history instead of being replaced by a new
+            upload.
           '';
         };
 
@@ -482,9 +487,14 @@ let
 
       ${optionalString syncConfig.markdownSync.trackMoves ''
         ${mirrorMovesFn}
+        ids_file=${escapeShellArg (markdownIdsPath name syncConfig)}
+        remote=${escapeShellArg syncConfig.remote}
+        rclone=(${escapeShellArgs ([ (getExe pkgs.rclone) ] ++ mkRemoteArgs name syncConfig)})
+        listing1=${escapeShellArg (bisyncListingPath syncConfig 1)}
+        listing2=${escapeShellArg (bisyncListingPath syncConfig 2)}
         # Vault is authoritative for paths here: follow md moves with the docx,
-        # so bisync sees a move as delete+create rather than create-only.
-        mirror_moves "$md_dir" .md "$docx_dir" .docx
+        # and carry them through to the remote as renames.
+        mirror_moves "$md_dir" .md "$docx_dir" .docx "$ids_file" follow_remote_move
       ''}
 
       md_files=("$md_dir"/**/*.md)
@@ -519,6 +529,12 @@ let
             fi
           done
         fi
+      ''}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        # Again here, not just after the post-sync: that one is skipped when a
+        # bisync pass fails, and the next run still needs current identities.
+        record_ids "$md_dir" .md "$ids_file"
       ''}
     '';
 
@@ -572,6 +588,10 @@ let
           done
         fi
       ''}
+
+      ${optionalString syncConfig.markdownSync.trackMoves ''
+        record_ids "$md_dir" .md ${escapeShellArg (markdownIdsPath name syncConfig)}
+      ''}
     '';
 
   # ── Builders ──────────────────────────────────────────────────────────
@@ -610,7 +630,7 @@ let
       ) "drive-root-folder-id=${m.googleDrive.rootFolderId}"
     );
 
-  mkGDriveArgs =
+  mkGDriveBackendArgs =
     s:
     optionals s.googleDrive.enable (
       [
@@ -618,13 +638,30 @@ let
         s.googleDrive.exportFormats
         "--drive-import-formats"
         s.googleDrive.importFormats
-        "--fix-case"
-        "--slow-hash-sync-only"
       ]
       ++ optional (
         s.googleDrive.rootFolderId != null
       ) "--drive-root-folder-id=${s.googleDrive.rootFolderId}"
     );
+
+  mkGDriveSyncArgs =
+    s:
+    optionals s.googleDrive.enable [
+      "--fix-case"
+      "--slow-hash-sync-only"
+    ];
+
+  # Everything needed to reach the remote and see it as bisync does, minus the
+  # sync-only flags: the one-off rclone calls the markdown hooks make against
+  # the same remote share these with bisync itself.
+  mkRemoteArgs =
+    name: s:
+    mkSftpArgs s
+    ++ mkGDriveBackendArgs s
+    ++ optionals (s.configFile != null) [
+      "--config"
+      (stagedBisyncConfigPath name)
+    ];
 
   # Derive the listing filename rclone bisync uses under <home>/.cache/rclone/bisync/.
   # Must be a literal path: %h in system units resolves to the service
@@ -633,11 +670,15 @@ let
   # for `alias` remotes (which resolve to their target) this derivation won't
   # match and the initial resync would re-run on every sync.
   bisyncListingPath =
-    s:
+    s: n:
     let
       sanitize = p: builtins.replaceStrings [ ":" "/" " " ] [ "_" "_" "_" ] (removePrefix "/" p);
     in
-    "${userHomeOf s.user}/.cache/rclone/bisync/${sanitize s.localPath}..${sanitize s.remote}.path1.lst";
+    "${userHomeOf s.user}/.cache/rclone/bisync/${sanitize s.localPath}..${sanitize s.remote}.path${toString n}.lst";
+
+  # Identity snapshot of the markdown tree, for mirror_moves to recognise a
+  # renamed file by on the next run. Losing it only costs that one pairing pass.
+  markdownIdsPath = name: s: "${userHomeOf s.user}/.cache/rclone/markdown-sync/${name}.ids";
 
   # ── Mounts ────────────────────────────────────────────────────────────
 
@@ -752,14 +793,10 @@ let
         "--conflict-loser"
         s.conflictLoser
       ]
-      ++ mkSftpArgs s
       ++ mkExcludeArgs s
-      ++ mkGDriveArgs s
-      ++ s.extraArgs
-      ++ optionals (s.configFile != null) [
-        "--config"
-        (stagedBisyncConfigPath name)
-      ];
+      ++ mkGDriveSyncArgs s
+      ++ mkRemoteArgs name s
+      ++ s.extraArgs;
     in
     pkgs.writeShellScript scriptName ''
       exec ${escapeShellArgs argv}
@@ -776,7 +813,7 @@ let
       # main sync instead of letting it fail confusingly on missing listings.
       requiredBy = [ "rclone-bisync-${name}.service" ];
       before = [ "rclone-bisync-${name}.service" ];
-      unitConfig.ConditionPathExists = "!${bisyncListingPath s}";
+      unitConfig.ConditionPathExists = "!${bisyncListingPath s 1}";
       path = serviceEnvPackages;
       serviceConfig = {
         Type = "oneshot";

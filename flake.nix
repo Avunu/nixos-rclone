@@ -179,6 +179,116 @@
                 touch $out
               '';
 
+          # A rename made in the vault must reach the remote as a rename of the
+          # *same* file, not as bisync's delete + create (which on Google Drive
+          # mints a new file ID and trashes the original). Runs real rclone
+          # bisync against local directories, with the remote side driven by
+          # follow_remote_move exactly as the pre-sync hook drives it.
+          checks.remote-renames =
+            pkgs.runCommand "test-remote-renames"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.rclone
+                ];
+              }
+              ''
+                set -euo pipefail
+                shopt -s globstar nullglob
+                source ${./mirror-moves.sh}
+
+                V="$TMPDIR/vault"; L="$TMPDIR/docx"; R="$TMPDIR/remote"; W="$TMPDIR/bisync"
+                ids_file="$TMPDIR/vault.ids"
+                export RCLONE_CONFIG="$TMPDIR/rclone.conf"
+                mkdir -p "$V/Sub" "$L" "$R" "$W"
+
+                # Stand-in for the pandoc pass: newer md -> docx, carrying mtime.
+                convert() {
+                  local md rel docx
+                  for md in "$V"/**/*.md; do
+                    rel="''${md#"$V"/}"; docx="$L/''${rel%.md}.docx"
+                    if [ ! -f "$docx" ] || [ "$md" -nt "$docx" ]; then
+                      mkdir -p "$(dirname "$docx")"
+                      cp "$md" "$docx"; touch -r "$md" "$docx"
+                    fi
+                  done
+                }
+                bisync() { rclone bisync "$L" "$R" --workdir "$W" --verbose --color NEVER "$@" 2>&1 | tee "$TMPDIR/bisync.log"; }
+                fail() { echo "FAIL: $*"; exit 1; }
+
+                for n in "Statement on Gender Roles" Keep1 Keep2 Keep3 Sub/Nested Gone; do
+                  echo "$n" > "$V/$n.md"; touch -d "2026-01-01 00:00:00" "$V/$n.md"
+                done
+                convert
+                bisync --resync
+                record_ids "$V" .md "$ids_file"
+
+                remote="$R"
+                rclone=(rclone)
+                listing1=$(echo "$W"/*.path1.lst); listing2=$(echo "$W"/*.path2.lst)
+                [ -f "$listing1" ] && [ -f "$listing2" ] || fail "no bisync listings"
+
+                old_ino=$(stat -c %i "$R/Statement on Gender Roles.docx")
+                nested_ino=$(stat -c %i "$R/Sub/Nested.docx")
+
+                # Renamed AND edited, so neither basename nor mtime can pair it:
+                # only the identity pass can. Plus a pure relocation, and a real
+                # delete + create that must stay unpaired.
+                mv "$V/Statement on Gender Roles.md" "$V/Scriptural Basis of Godly Femininity and Masculinity.md"
+                echo edited >> "$V/Scriptural Basis of Godly Femininity and Masculinity.md"
+                mkdir -p "$V/Archive"; mv "$V/Sub/Nested.md" "$V/Archive/Nested.md"
+                rm "$V/Gone.md"; echo new > "$V/Brand New.md"
+
+                mirror_moves "$V" .md "$L" .docx "$ids_file" follow_remote_move 2> "$TMPDIR/moves.log"
+                cat "$TMPDIR/moves.log"
+                grep -q "followed move by identity: Statement on Gender Roles.docx -> Scriptural Basis" "$TMPDIR/moves.log" \
+                  || fail "rename+edit not paired by identity"
+                grep -q "unpaired orphan 'Gone.docx'" "$TMPDIR/moves.log" || fail "delete was paired"
+                grep -q "unpaired new file 'Brand New.md'" "$TMPDIR/moves.log" || fail "create was paired"
+
+                # Server-side move on the local backend is rename(2): same inode.
+                new_ino=$(stat -c %i "$R/Scriptural Basis of Godly Femininity and Masculinity.docx")
+                [ "$new_ino" = "$old_ino" ] || fail "remote file was replaced, not renamed"
+                [ "$(stat -c %i "$R/Archive/Nested.docx")" = "$nested_ino" ] || fail "nested move not renamed"
+                [ ! -e "$R/Statement on Gender Roles.docx" ] || fail "old remote path survives"
+
+                # What the rest of pre-sync does, then the sync itself.
+                convert
+                rm "$L/Gone.docx"
+                bisync
+                grep -q "Path1 *File changed: .* - Scriptural Basis" "$TMPDIR/bisync.log" \
+                  || fail "edit not seen as an in-place change"
+                if grep -E "Queue delete .*(Statement|Scriptural|Nested)|File is new .*(Scriptural|Nested)" "$TMPDIR/bisync.log"; then
+                  fail "bisync replayed a move as delete + create"
+                fi
+                grep -q edited "$R/Scriptural Basis of Godly Femininity and Masculinity.docx" || fail "edit not uploaded"
+                [ ! -e "$R/Gone.docx" ] && [ -e "$R/Brand New.docx" ] || fail "plain delete/create not synced"
+                record_ids "$V" .md "$ids_file"
+
+                # Offline remote: the run must stop before touching anything.
+                mv "$V/Keep1.md" "$V/Renamed1.md"
+                remote="nosuchremote:"
+                if (mirror_moves "$V" .md "$L" .docx "$ids_file" follow_remote_move); then
+                  fail "an unreachable remote did not abort the run"
+                fi
+                [ -e "$L/Keep1.docx" ] && [ ! -e "$L/Renamed1.docx" ] || fail "local move made despite abort"
+                grep -q '"Keep1.docx"$' "$listing2" || fail "listing changed despite abort"
+
+                # Already gone from the remote: follow locally, leave the rest to bisync.
+                remote="$R"
+                rm "$R/Keep1.docx"
+                mirror_moves "$V" .md "$L" .docx "$ids_file" follow_remote_move
+                [ -e "$L/Renamed1.docx" ] || fail "local move not made"
+                convert
+                bisync
+                [ -e "$R/Renamed1.docx" ] && [ ! -e "$R/Keep1.docx" ] || fail "vanished-remote case not synced"
+
+                bisync
+                grep -q "No changes found" "$TMPDIR/bisync.log" || fail "pair did not converge"
+
+                touch $out
+              '';
+
           pre-commit.check.enable = false;
 
           pre-commit.settings.hooks.paths-with-spaces = {
@@ -195,6 +305,15 @@
             name = "move-tracking";
             description = "Verify moves and renames are followed, not duplicated";
             entry = "nix build .#checks.${system}.move-tracking --no-link";
+            language = "system";
+            pass_filenames = false;
+          };
+
+          pre-commit.settings.hooks.remote-renames = {
+            enable = true;
+            name = "remote-renames";
+            description = "Verify vault renames reach the remote as renames, not delete + create";
+            entry = "nix build .#checks.${system}.remote-renames --no-link";
             language = "system";
             pass_filenames = false;
           };
@@ -264,6 +383,10 @@
                   "d /srv/remote-data 0777 root root -"
                   "d /srv/remote-data/mountdir 0777 root root -"
                   "d /srv/remote-data/syncdir 0777 root root -"
+                  "d /srv/remote-data/notes 0777 root root -"
+                  # bisync will not sync against an empty side.
+                  "f /srv/remote-data/notes/seed.txt 0666 root root - seed"
+                  "d /home/alice/vault 0755 alice users -"
                 ];
 
                 services.rclone-remotes = {
@@ -290,6 +413,19 @@
                     settlePass = {
                       enable = true;
                       delay = 1;
+                    };
+                  };
+
+                  bisyncs.notes = {
+                    remote = "/srv/remote-data/notes";
+                    localPath = "/home/alice/notes-docx";
+                    configFile = "/etc/rclone-test.conf";
+                    user = "alice";
+                    onBootSec = "1h";
+                    settlePass.enable = false;
+                    markdownSync = {
+                      enable = true;
+                      path = "/home/alice/vault";
                     };
                   };
                 };
@@ -352,6 +488,39 @@
                   machine.succeed("systemctl start rclone-bisync-test.service")
                   delta = successes() - before
                   assert delta == 2, f"one start produced {delta} bisync passes, expected 2"
+
+              with subtest("markdownSync: a vault rename renames the remote file, not delete + create"):
+                  vault = "/home/alice/vault"
+                  remote = "/srv/remote-data/notes"
+                  for name in ["Statement on Gender Roles", "Draft", "Other"]:
+                      machine.succeed(f"sudo -u alice sh -c 'echo \"# {name}\" > \"{vault}/{name}.md\"'")
+                  machine.succeed("systemctl start rclone-bisync-notes.service")
+                  machine.succeed(f"test -f '{remote}/Statement on Gender Roles.docx'")
+                  # A server-side move on a local remote is rename(2), so the
+                  # remote file keeps its inode only if it was really renamed.
+                  ino = machine.succeed(f"stat -c %i '{remote}/Statement on Gender Roles.docx'").strip()
+
+                  machine.succeed(f"sudo -u alice mv '{vault}/Statement on Gender Roles.md' '{vault}/Scriptural Basis.md'")
+                  # Renamed *and* edited: only the identity pass can pair it.
+                  machine.succeed(f"sudo -u alice mv '{vault}/Draft.md' '{vault}/Final.md'")
+                  machine.succeed(f"sudo -u alice sh -c 'echo edited >> {vault}/Final.md'")
+                  machine.succeed("systemctl start rclone-bisync-notes.service")
+
+                  run = machine.succeed(
+                      "journalctl -o cat _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value rclone-bisync-notes.service)"
+                  )
+                  print(run)
+                  assert "followed move by identity: Statement on Gender Roles.docx -> Scriptural Basis.docx" in run
+                  assert "followed move by identity: Draft.docx -> Final.docx" in run
+                  assert "renamed on remote" in run
+                  assert "Queue delete" not in run, "bisync replayed a rename as delete + create"
+                  new = machine.succeed(f"stat -c %i '{remote}/Scriptural Basis.docx'").strip()
+                  assert new == ino, f"remote file was replaced (inode {ino} -> {new}), not renamed"
+                  machine.fail(f"test -e '{remote}/Statement on Gender Roles.docx'")
+                  machine.fail(f"test -e '{remote}/Draft.docx'")
+                  machine.succeed(f"test -f '{remote}/Final.docx'")
+                  machine.succeed(f"test -f '{vault}/Final.md'")
+                  machine.fail(f"test -e '{vault}/Draft.md'")
             '';
           };
 
