@@ -25,6 +25,9 @@ updates:
   # holding a new version back that long keeps one from reaching an
   # auto-merged PR. The daemon runs as root-adjacent system services. Security
   # updates are separate from version updates and are not delayed.
+  #
+  # Deliberately ungrouped: one PR per crate, so a bump that breaks the build
+  # fails CI on its own and the rest still merge.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -34,9 +37,6 @@ updates:
       semver-major-days: 14
     commit-message:
       prefix: chore
-    groups:
-      cargo:
-        patterns: ["*"]
 
   # The CI that gates the above. The workflows pin every action to a commit SHA
   # (a tag can be moved; a SHA cannot), and Dependabot updates the SHA and its

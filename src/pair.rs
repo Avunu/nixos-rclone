@@ -245,13 +245,9 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
     pair.status.state = State::Idle;
     pair.status.pending = pair.retry.len() as u64;
 
-    let _ = sd_notify::notify(false, &[NotifyState::Ready]);
-    let mut usec = 0;
-    if sd_notify::watchdog_enabled(false, &mut usec) {
-        tokio::spawn(watchdog(
-            rt.dir.join("rc.sock"),
-            Duration::from_micros(usec),
-        ));
+    let _ = sd_notify::notify(&[NotifyState::Ready]);
+    if let Some(period) = sd_notify::watchdog_enabled() {
+        tokio::spawn(watchdog(rt.dir.join("rc.sock"), period));
     }
 
     let mut next = Instant::now() + pair.cfg.pull_on_boot() + jitter(pair.cfg.pull_jitter());
@@ -321,7 +317,7 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
         }
     };
 
-    let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
+    let _ = sd_notify::notify(&[NotifyState::Stopping]);
     rcd.shutdown(Duration::from_secs(20)).await;
     let _ = std::fs::remove_file(&ctl_path);
     outcome
@@ -801,7 +797,7 @@ async fn watchdog(sock: PathBuf, period: Duration) {
             .await
             .is_ok_and(|r| r.is_ok())
         {
-            let _ = sd_notify::notify(false, &[NotifyState::Watchdog]);
+            let _ = sd_notify::notify(&[NotifyState::Watchdog]);
         }
     }
 }
