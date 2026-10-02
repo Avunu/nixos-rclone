@@ -1,0 +1,54 @@
+version: 2
+
+updates:
+  # Flake inputs. Daily, and grouped so nixpkgs and its companions move
+  # together. No cooldown: nixpkgs has already been through Hydra. Consumers
+  # only get binary-cache hits while their nixpkgs matches the locked one, so
+  # keeping this lock fresh keeps the cache useful.
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: daily
+    commit-message:
+      prefix: chore
+    groups:
+      nix:
+        patterns: ["*"]
+
+  # The daemon's Rust dependencies.
+  #
+  # Safe to automate: nix/package.nix builds with
+  # `cargoLock.lockFile = ../Cargo.lock`, so there is no cargoHash to
+  # regenerate and a lockfile bump is the whole change; the package's
+  # `cargo test` runs in its build. The cooldown is the supply-chain control:
+  # malicious crates.io releases are usually caught and yanked within days, and
+  # holding a new version back that long keeps one from reaching an
+  # auto-merged PR. The daemon runs as root-adjacent system services. Security
+  # updates are separate from version updates and are not delayed.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
+      semver-major-days: 14
+    commit-message:
+      prefix: chore
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # The CI that gates the above. The workflows pin every action to a commit SHA
+  # (a tag can be moved; a SHA cannot), and Dependabot updates the SHA and its
+  # `# vX` comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: chore
+    groups:
+      actions:
+        patterns: ["*"]

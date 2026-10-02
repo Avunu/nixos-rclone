@@ -1,0 +1,50 @@
+[package]
+name = "rclone-remotes"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Supervisor daemon for the nixos-rclone NixOS module: rclone rc API, filesystem watching, markdown/docx conversion"
+license = "MIT"
+repository = "https://github.com/Avunu/nixos-rclone"
+publish = false
+
+[lib]
+name = "rclone_remotes"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rclone-remotes"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+carta = { version = "=0.0.10", default-features = false, features = ["read-commonmark", "read-docx", "write-docx", "write-markdown"] }
+clap = { version = "4", features = ["derive", "env"] }
+filetime = "0.2"
+notify = "8"
+notify-debouncer-full = "0.6"
+rclone-sdk = "=1.75.0"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
+reqwest = { version = "0.12.28", default-features = false }
+rustix = { version = "1", features = ["fs", "mount", "process"] }
+sd-notify = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "signal", "time", "io-util", "fs", "sync"] }
+tracing = "0.1"
+unicode-general-category = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

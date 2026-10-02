@@ -9,36 +9,35 @@
 
 let
   inherit (lib)
+    attrValues
     concatMap
     concatStringsSep
-    escapeShellArg
-    escapeShellArgs
     filterAttrs
-    flatten
     getExe
     listToAttrs
+    literalExpression
     mapAttrs
     mapAttrsToList
     mkEnableOption
     mkIf
     mkMerge
+    mkRemovedOptionModule
+    mkRenamedOptionModule
     mkOption
     nameValuePair
     optional
     optionalAttrs
     optionals
-    optionalString
-    removePrefix
     types
     ;
 
   cfg = config.services.rclone-remotes;
 
-  filters = import ./filters pkgs;
+  rcloneRemotes = getExe cfg.package;
 
   serviceEnvPackages = [
     pkgs.coreutils
-    pkgs.rclone
+    cfg.rclonePackage
   ];
 
   userHomeOf = user: config.users.users.${user}.home or "/home/${user}";
@@ -229,370 +228,361 @@ let
   };
 
   # ── Submodule: bisync ─────────────────────────────────────────────────
-  bisyncSubmodule = types.submodule {
-    options = {
-      remote = mkOption {
-        type = types.str;
-        description = "Rclone remote path, e.g. `webdav:ssh`.";
-      };
-      localPath = mkOption {
-        type = types.path;
-        description = "Absolute local directory to sync.";
-      };
-      configFile = mkOption {
-        type = types.nullOr types.str;
-        default = cfg.defaultConfigFile;
-        description = "Path to the rclone config file. Defaults to rclone's default (~/.config/rclone/rclone.conf) when null.";
-      };
-      user = mkOption {
-        type = types.str;
-        default = cfg.defaultUser;
-        description = "User to run the sync as.";
-      };
-      group = mkOption {
-        type = types.str;
-        default = cfg.defaultGroup;
-        description = "Group for the sync service.";
-      };
-      dirPerms = mkOption {
-        type = types.str;
-        default = "0755";
-        description = "Permission mode for the local directory (tmpfiles).";
-      };
-      interval = mkOption {
-        type = types.str;
-        default = "15min";
-        description = "How often to re-sync after the last run completes (OnUnitActiveSec).";
-      };
-      onBootSec = mkOption {
-        type = types.str;
-        default = "5min";
-        description = "Delay after boot before the first sync.";
-      };
-      baseArgs = mkOption {
-        type = types.listOf types.str;
-        default = [
-          "--verbose"
-          "--resilient"
-          "--recover"
-          "--create-empty-src-dirs"
-          "--max-lock"
-          "5m"
-          "--compare"
-          "size,modtime,checksum"
-        ];
-        description = ''
-          Base arguments passed to `rclone bisync`. Replace this only to drop or
-          change one of the defaults; to *add* arguments use `extraArgs`, which
-          is appended on top.
+  bisyncSubmodule = types.submodule (
+    { config, ... }:
+    {
+      # Options that changed shape in the move to the daemon keep working, with
+      # a deprecation warning pointing at the new name.
+      imports = [
+        (mkRenamedOptionModule [ "interval" ] [ "pull" "interval" ])
+        (mkRenamedOptionModule [ "onBootSec" ] [ "pull" "onBoot" ])
+        (mkRenamedOptionModule [ "conflictResolve" ] [ "conflict" "resolve" ])
+        (mkRenamedOptionModule [ "conflictLoser" ] [ "conflict" "loser" ])
+        (mkRenamedOptionModule [ "settlePass" "enable" ] [ "settle" "enable" ])
+        (mkRenamedOptionModule [ "settlePass" "delay" ] [ "settle" "delay" ])
+        (mkRemovedOptionModule [ "baseArgs" ] ''
+          bisync no longer shells out to `rclone bisync`, so there is no flag list.
+          Its defaults are now the typed options `compare`, `resilient`, `recover`,
+          `createEmptySrcDirs` and `maxLock`.
+        '')
+        (mkRemovedOptionModule [ "markdownSync" "mdToDocxArgs" ] ''
+          Conversion no longer shells out to pandoc, so there are no pandoc flags.
+          To style new documents after a template use `markdownSync.referenceDoc`.
+        '')
+        (mkRemovedOptionModule [ "markdownSync" "docxToMdArgs" ] ''
+          Conversion no longer shells out to pandoc, so there are no pandoc flags.
+          Markdown is written unwrapped, as `--wrap=none` did.
+        '')
+        (mkRemovedOptionModule [ "extraArgs" ] ''
+          bisync no longer shells out to `rclone bisync`. Pass extra rc parameters
+          through `extraParams` instead, e.g. `extraParams.ignoreListingChecksum = true;`.
+          Backend flags such as --drive-acknowledge-abuse have no per-pair
+          equivalent yet.
+        '')
+      ];
 
-          Conflict handling lives in `conflictResolve`/`conflictLoser` rather
-          than here, so that changing it does not mean restating this list.
-        '';
-      };
-
-      extraArgs = mkOption {
-        type = types.listOf types.str;
-        default = [ ];
-        description = ''
-          Additional arguments appended to `rclone bisync`, on top of
-          `baseArgs` and the conflict and Google Drive flags.
-        '';
-        example = [ "--drive-acknowledge-abuse" ];
-      };
-
-      conflictResolve = mkOption {
-        type = types.enum [
-          "none"
-          "path1"
-          "path2"
-          "newer"
-          "older"
-          "larger"
-          "smaller"
-        ];
-        default = "newer";
-        description = ''
-          How to pick the winner when a file changed on both sides
-          (`--conflict-resolve`). rclone's own default is `none`, which keeps
-          both; `newer` is a better fit for a periodic timer, where the side
-          you touched most recently is almost always the one you meant.
-        '';
-      };
-
-      conflictLoser = mkOption {
-        type = types.enum [
-          "num"
-          "pathname"
-          "delete"
-        ];
-        default = "delete";
-        description = ''
-          What to do with the losing copy of a conflict (`--conflict-loser`).
-
-          - `num` — keep it as `file.docx.conflict1`, `.conflict2`, … This is
-            rclone's own default and the conservative choice: nothing is ever
-            discarded, at the cost of debris if conflicts are frequent.
-          - `pathname` — keep it as `file.docx.path1` / `.path2`.
-          - `delete` — discard it, keeping the winner only.
-
-          Note that `delete` loses a version of a *genuine* simultaneous edit.
-          It pairs well with `settlePass`, which removes the spurious conflicts
-          that would otherwise dominate; but if conflicts are rare in your
-          setup, they are more likely to be real, and `num` is the safer pick.
-        '';
-      };
-
-      settlePass = {
-        enable = mkOption {
-          type = types.bool;
-          default = true;
-          description = ''
-            Run a second bisync pass, to reconcile remotes that rewrite modtimes
-            after an upload.
-
-            Google Drive does this whenever `--drive-import-formats` converts an
-            uploaded file into a native Google Doc: the conversion finishes
-            asynchronously and stamps the Doc's `modifiedTime` with the
-            conversion time, seconds after rclone has already recorded the
-            modtime it asked for. The next run therefore sees Path2 as "changed"
-            even though nobody touched the remote. On its own that is harmless —
-            bisync just pulls the file back down — but if the local side changed
-            in the same window, bisync sees both sides as changed and declares a
-            conflict, spraying `.conflictN` files on every run.
-
-            The second pass closes that window: it runs after the first has
-            uploaded, so it pulls the restamped remote copy back down and the
-            listings converge *within* the run instead of colliding at the next
-            one. Pre/post-sync hooks run once each, around both passes, so the
-            local side cannot change between them and the second pass cannot
-            itself conflict.
-
-            On by default, because getting this wrong corrupts a pair quietly.
-            Turn it off for remotes that store modtimes faithfully — SFTP,
-            WebDAV, plain local paths — where the extra pass buys nothing and
-            costs a full second listing plus `delay` seconds on every run.
-          '';
-        };
-
-        delay = mkOption {
-          type = types.int;
-          default = 30;
-          description = ''
-            Seconds to wait between the two passes, to give the remote time to
-            finish rewriting modtimes. Observed Google Drive conversion lag is
-            5-10s; the default leaves generous headroom.
-          '';
-        };
-      };
-
-      googleDrive = googleDriveOptions;
-
-      sftp = sftpOptions;
-
-      excludes = excludesOption;
-
-      markdownSync = {
-        enable = mkEnableOption "bidirectional markdown/docx sync";
-
-        path = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-          description = ''
-            Path to the markdown directory (e.g. Obsidian vault). Markdown files
-            here are converted to docx in localPath before sync, and docx files
-            synced from the remote are converted back after sync.
-          '';
-          example = "/home/user/ObsidianVault";
-        };
-
-        syncDeletions = mkOption {
-          type = types.bool;
-          default = true;
-          description = ''
-            Propagate deletions between the markdown and docx directories.
-
-            On by default: without it a deletion never sticks. The surviving
-            counterpart simply regenerates the document at its old path on the
-            next run, the same resurrection that `trackMoves` fixes for moves.
-
-            `trackMoves` runs first and consumes relocations, so only genuine
-            deletions reach this pass, and a side that is empty or unmounted is
-            skipped rather than propagated. It does still delete files, though —
-            set it to `false` if you would rather let orphans accumulate.
-          '';
-        };
-
-        trackMoves = mkOption {
-          type = types.bool;
-          default = true;
-          description = ''
-            Follow moves and renames instead of duplicating them.
-
-            The two trees are matched by path, so relocating a file on one side
-            reads as "deleted here, created there" on the other, and the stale
-            counterpart regenerates the document at its old path on the next
-            run — leaving it at both paths, in both trees, permanently. rclone
-            bisync cannot help here: it has no rename tracking and models every
-            move as delete + create.
-
-            With this on, an orphaned file is paired with a newly-appeared one
-            (by inode, basename or mtime) and moved to match. Only unambiguous
-            1:1 pairings are followed; anything else is logged and left alone.
-
-            A move made in the markdown directory is also performed on the
-            remote, as a server-side move, so a Google Drive document keeps its
-            file ID, sharing and history instead of being replaced by a new
-            upload.
-          '';
-        };
-
-        mdToDocxArgs = mkOption {
+      options = {
+        # The shims above report through these; a submodule has no top-level
+        # `warnings`/`assertions`, so they are collected in `config` below.
+        warnings = mkOption {
           type = types.listOf types.str;
           default = [ ];
-          description = "Extra arguments for markdown to docx conversion.";
-          example = [ "--reference-doc=/path/to/template.docx" ];
+          internal = true;
+          visible = false;
+        };
+        assertions = mkOption {
+          type = types.listOf types.unspecified;
+          default = [ ];
+          internal = true;
+          visible = false;
         };
 
-        docxToMdArgs = mkOption {
-          type = types.listOf types.str;
-          default = [ "--wrap=none" ];
-          description = "Extra arguments for docx to markdown conversion.";
+        remote = mkOption {
+          type = types.str;
+          description = "Rclone remote path, e.g. `webdav:ssh`.";
+        };
+        localPath = mkOption {
+          type = types.path;
+          description = "Absolute local directory to sync.";
+        };
+        configFile = mkOption {
+          type = types.nullOr types.str;
+          default = cfg.defaultConfigFile;
+          description = "Path to the rclone config file. Defaults to rclone's default (~/.config/rclone/rclone.conf) when null.";
+        };
+        user = mkOption {
+          type = types.str;
+          default = cfg.defaultUser;
+          description = "User to run the sync as.";
+        };
+        group = mkOption {
+          type = types.str;
+          default = cfg.defaultGroup;
+          description = "Group for the sync service.";
+        };
+        dirPerms = mkOption {
+          type = types.str;
+          default = "0755";
+          description = "Permission mode for the local directory (tmpfiles).";
+        };
+        workdir = mkOption {
+          type = types.str;
+          default = "${userHomeOf config.user}/.cache/rclone/bisync";
+          defaultText = literalExpression ''"''${home of user}/.cache/rclone/bisync"'';
+          description = ''
+            Where bisync keeps its listings. The default is rclone's own, so
+            pairs created by earlier versions of this module keep their history
+            and are not forced to resync.
+          '';
+        };
+
+        push = {
+          enable = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Watch `localPath` and send local changes to the remote as they
+              happen: new and modified files are uploaded, deletions are
+              applied, and a rename becomes a server-side move there, so a
+              Google Drive document keeps its file ID, sharing and history.
+              The periodic `pull` remains the way remote changes arrive, and
+              catches anything the watcher missed.
+
+              Nothing is pushed until the pair has completed its first sync.
+              Files whose names contain control characters are left to the
+              pull. The watcher needs an inotify watch per directory, so a very
+              large tree may need `boot.kernel.sysctl."fs.inotify.max_user_watches"`
+              raised (NixOS defaults to 524288).
+            '';
+          };
+          debounce = mkOption {
+            type = types.str;
+            default = "2s";
+            description = ''
+              How long the tree must be quiet before a burst of changes is
+              pushed (systemd time-span syntax, at least 100ms). Longer values
+              keep a file still being written from being uploaded half done.
+            '';
+          };
+        };
+
+        pull = {
+          interval = mkOption {
+            type = types.str;
+            default = "15min";
+            description = ''
+              How often to pull remote changes, counted from the end of the last
+              pull (systemd time-span syntax). rclone has no change notification
+              to subscribe to, so remote changes are found by polling; local
+              changes do not wait for this.
+            '';
+          };
+          onBoot = mkOption {
+            type = types.str;
+            default = "5min";
+            description = "Delay after the service starts before the first pull.";
+          };
+          jitter = mkOption {
+            type = types.str;
+            default = "5min";
+            description = "Up to this much random delay is added to each pull, so pairs do not all hit the network at once.";
+          };
+        };
+
+        conflict = {
+          resolve = mkOption {
+            type = types.enum [
+              "none"
+              "path1"
+              "path2"
+              "newer"
+              "older"
+              "larger"
+              "smaller"
+            ];
+            default = "newer";
+            description = ''
+              How to pick the winner when a file changed on both sides
+              (`--conflict-resolve`). rclone's own default is `none`, which keeps
+              both; `newer` is a better fit for a periodic timer, where the side
+              you touched most recently is almost always the one you meant.
+            '';
+          };
+
+          loser = mkOption {
+            type = types.enum [
+              "num"
+              "pathname"
+              "delete"
+            ];
+            default = "delete";
+            description = ''
+              What to do with the losing copy of a conflict (`--conflict-loser`).
+
+              - `num` — keep it as `file.docx.conflict1`, `.conflict2`, … This is
+                rclone's own default and the conservative choice: nothing is ever
+                discarded, at the cost of debris if conflicts are frequent.
+              - `pathname` — keep it as `file.docx.path1` / `.path2`.
+              - `delete` — discard it, keeping the winner only.
+
+              Note that `delete` loses a version of a *genuine* simultaneous edit.
+              It pairs well with `settle`, which removes the spurious conflicts
+              that would otherwise dominate; but if conflicts are rare in your
+              setup, they are more likely to be real, and `num` is the safer pick.
+            '';
+          };
+        };
+
+        compare = mkOption {
+          type = types.str;
+          default = "size,modtime,checksum";
+          description = "How bisync decides two files are the same (`compare`).";
+        };
+
+        resilient = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Retry the next run after a recoverable error instead of demanding a resync (`resilient`).";
+        };
+
+        recover = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Recover from an interrupted run using the backup listings (`recover`).";
+        };
+
+        createEmptySrcDirs = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Keep empty directories in sync (`createEmptySrcDirs`).";
+        };
+
+        maxLock = mkOption {
+          type = types.str;
+          default = "5m";
+          description = "How long a crashed run's lock is honoured before it is considered stale (`maxLock`).";
+        };
+
+        maxDelete = mkOption {
+          type = types.nullOr (types.ints.between 0 100);
+          default = null;
+          description = ''
+            Abort if more than this percentage of files would be deleted
+            (`maxDelete`). Null uses rclone's own default of 50.
+          '';
+        };
+
+        extraParams = mkOption {
+          type = types.attrsOf types.anything;
+          default = { };
+          example = {
+            ignoreListingChecksum = true;
+          };
+          description = ''
+            Additional parameters for rclone's `sync/bisync` call, merged over the
+            options above. See the rclone rc documentation for the full list.
+          '';
+        };
+
+        settle = {
+          enable = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Run a second bisync pass, to reconcile remotes that rewrite modtimes
+              after an upload.
+
+              Google Drive does this whenever `importFormats` converts an
+              uploaded file into a native Google Doc: the conversion finishes
+              asynchronously and stamps the Doc's `modifiedTime` with the
+              conversion time, seconds after rclone has already recorded the
+              modtime it asked for. The next run therefore sees Path2 as "changed"
+              even though nobody touched the remote. On its own that is harmless —
+              bisync just pulls the file back down — but if the local side changed
+              in the same window, bisync sees both sides as changed and declares a
+              conflict, spraying `.conflictN` files on every run.
+
+              The second pass closes that window: it runs after the first has
+              uploaded, so it pulls the restamped remote copy back down and the
+              listings converge *within* the run instead of colliding at the next
+              one. The markdown conversion runs once, around both passes, so the
+              local side cannot change between them and the second pass cannot
+              itself conflict.
+
+              On by default, because getting this wrong corrupts a pair quietly.
+              Turn it off for remotes that store modtimes faithfully — SFTP,
+              WebDAV, plain local paths — where the extra pass buys nothing and
+              costs a full second listing plus `delay` seconds on every run.
+            '';
+          };
+
+          delay = mkOption {
+            type = types.int;
+            default = 30;
+            description = ''
+              Seconds to wait between the two passes, to give the remote time to
+              finish rewriting modtimes. Observed Google Drive conversion lag is
+              5-10s; the default leaves generous headroom.
+            '';
+          };
+        };
+
+        googleDrive = googleDriveOptions;
+
+        sftp = sftpOptions;
+
+        excludes = excludesOption;
+
+        markdownSync = {
+          enable = mkEnableOption "bidirectional markdown/docx sync";
+
+          path = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            description = ''
+              Path to the markdown directory (e.g. Obsidian vault). Markdown files
+              here are converted to docx in localPath before sync, and docx files
+              synced from the remote are converted back after sync.
+            '';
+            example = "/home/user/ObsidianVault";
+          };
+
+          syncDeletions = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Propagate deletions between the markdown and docx directories.
+
+              On by default: without it a deletion never sticks. The surviving
+              counterpart simply regenerates the document at its old path on the
+              next run, the same resurrection that `trackMoves` fixes for moves.
+
+              `trackMoves` runs first and consumes relocations, so only genuine
+              deletions reach this pass, and a side that is empty or unmounted is
+              skipped rather than propagated. It does still delete files, though —
+              set it to `false` if you would rather let orphans accumulate.
+            '';
+          };
+
+          trackMoves = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Follow moves and renames instead of duplicating them.
+
+              The two trees are matched by path, so relocating a file on one side
+              reads as "deleted here, created there" on the other, and the stale
+              counterpart regenerates the document at its old path on the next
+              run — leaving it at both paths, in both trees, permanently. rclone
+              bisync cannot help here: it has no rename tracking and models every
+              move as delete + create.
+
+              With this on, an orphaned file is paired with a newly-appeared one
+              (by inode, basename or mtime) and moved to match. Only unambiguous
+              1:1 pairings are followed; anything else is logged and left alone.
+
+              A move made in the markdown directory is also performed on the
+              remote, as a server-side move, so a Google Drive document keeps its
+              file ID, sharing and history instead of being replaced by a new
+              upload.
+            '';
+          };
+
+          referenceDoc = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            example = "/home/user/template.docx";
+            description = ''
+              A docx whose styles (fonts, headings, spacing) a note's *first*
+              conversion starts from. After that, each note's own docx is the
+              reference, so formatting applied to it in Google Docs or Word
+              survives later edits of the note.
+            '';
+          };
         };
       };
-    };
-  };
-
-  # ── Markdown sync helpers ─────────────────────────────────────────────
-
-  # Shared by the pre- and post-sync hooks; see mirror-moves.sh for the why.
-  # Kept in a plain .sh file rather than inline so it can be sourced directly by
-  # checks.move-tracking, and so it is not written through Nix string escaping.
-  mirrorMovesFn = builtins.readFile ./mirror-moves.sh;
-
-  mkMarkdownPreSync =
-    name: syncConfig:
-    let
-      mdDir = syncConfig.markdownSync.path;
-      docxDir = syncConfig.localPath;
-      pandocBin = getExe pkgs.pandoc;
-      mdToDocxArgs = escapeShellArgs syncConfig.markdownSync.mdToDocxArgs;
-    in
-    pkgs.writeShellScript "markdown-pre-sync-${name}" ''
-      set -euo pipefail
-      shopt -s globstar nullglob
-
-      md_dir=${escapeShellArg mdDir}
-      docx_dir=${escapeShellArg docxDir}
-
-      ${optionalString syncConfig.markdownSync.trackMoves ''
-        ${mirrorMovesFn}
-        ids_file=${escapeShellArg (markdownIdsPath name syncConfig)}
-        remote=${escapeShellArg syncConfig.remote}
-        rclone=(${escapeShellArgs ([ (getExe pkgs.rclone) ] ++ mkRemoteArgs name syncConfig)})
-        listing1=${escapeShellArg (bisyncListingPath syncConfig 1)}
-        listing2=${escapeShellArg (bisyncListingPath syncConfig 2)}
-        # Vault is authoritative for paths here: follow md moves with the docx,
-        # and carry them through to the remote as renames.
-        mirror_moves "$md_dir" .md "$docx_dir" .docx "$ids_file" follow_remote_move
-      ''}
-
-      md_files=("$md_dir"/**/*.md)
-
-      for mdfile in "''${md_files[@]}"; do
-        relpath="''${mdfile#"$md_dir"/}"
-        docxfile="$docx_dir/''${relpath%.md}.docx"
-
-        if [ ! -f "$docxfile" ] || [ "$mdfile" -nt "$docxfile" ]; then
-          mkdir -p "$(dirname "$docxfile")"
-          ref_args=()
-          if [ -f "$docxfile" ]; then
-            ref_args=("--reference-doc=$docxfile")
-          fi
-          ${pandocBin} "$mdfile" --from=markdown+lists_without_preceding_blankline --wrap=preserve --filter ${filters.md2docx}/bin/md2docx "''${ref_args[@]}" -o "$docxfile" ${mdToDocxArgs}
-          touch -r "$mdfile" "$docxfile"
-        fi
-      done
-
-      ${optionalString syncConfig.markdownSync.syncDeletions ''
-        docx_files=("$docx_dir"/**/*.docx)
-        # Safety guard: an unmounted/empty markdown dir must not wipe every
-        # docx (and then propagate mass deletion to the remote).
-        if [ ''${#md_files[@]} -eq 0 ] && [ ''${#docx_files[@]} -gt 0 ]; then
-          echo "markdown dir '$md_dir' is missing or empty; skipping deletion pass" >&2
-        else
-          for docxfile in "''${docx_files[@]}"; do
-            relpath="''${docxfile#"$docx_dir"/}"
-            mdfile="$md_dir/''${relpath%.docx}.md"
-            if [ ! -f "$mdfile" ]; then
-              rm "$docxfile"
-            fi
-          done
-        fi
-      ''}
-
-      ${optionalString syncConfig.markdownSync.trackMoves ''
-        # Again here, not just after the post-sync: that one is skipped when a
-        # bisync pass fails, and the next run still needs current identities.
-        record_ids "$md_dir" .md "$ids_file"
-      ''}
-    '';
-
-  mkMarkdownPostSync =
-    name: syncConfig:
-    let
-      mdDir = syncConfig.markdownSync.path;
-      docxDir = syncConfig.localPath;
-      pandocBin = getExe pkgs.pandoc;
-      docxToMdArgs = escapeShellArgs syncConfig.markdownSync.docxToMdArgs;
-    in
-    pkgs.writeShellScript "markdown-post-sync-${name}" ''
-      set -euo pipefail
-      shopt -s globstar nullglob
-
-      md_dir=${escapeShellArg mdDir}
-      docx_dir=${escapeShellArg docxDir}
-
-      ${optionalString syncConfig.markdownSync.trackMoves ''
-        ${mirrorMovesFn}
-        # bisync has just applied the remote's moves to the docx tree, so the
-        # docx side is authoritative for paths here: follow them with the md.
-        mirror_moves "$docx_dir" .docx "$md_dir" .md
-      ''}
-
-      docx_files=("$docx_dir"/**/*.docx)
-
-      for docxfile in "''${docx_files[@]}"; do
-        relpath="''${docxfile#"$docx_dir"/}"
-        mdfile="$md_dir/''${relpath%.docx}.md"
-
-        if [ ! -f "$mdfile" ] || [ "$docxfile" -nt "$mdfile" ]; then
-          mkdir -p "$(dirname "$mdfile")"
-          ${pandocBin} "$docxfile" --filter ${filters.docx2md}/bin/docx2md -o "$mdfile" ${docxToMdArgs}
-          touch -r "$docxfile" "$mdfile"
-        fi
-      done
-
-      ${optionalString syncConfig.markdownSync.syncDeletions ''
-        md_files=("$md_dir"/**/*.md)
-        # Safety guard: an empty docx dir must not wipe the markdown vault.
-        if [ ''${#docx_files[@]} -eq 0 ] && [ ''${#md_files[@]} -gt 0 ]; then
-          echo "docx dir '$docx_dir' is missing or empty; skipping deletion pass" >&2
-        else
-          for mdfile in "''${md_files[@]}"; do
-            relpath="''${mdfile#"$md_dir"/}"
-            docxfile="$docx_dir/''${relpath%.md}.docx"
-            if [ ! -f "$docxfile" ]; then
-              rm "$mdfile"
-            fi
-          done
-        fi
-      ''}
-
-      ${optionalString syncConfig.markdownSync.trackMoves ''
-        record_ids "$md_dir" .md ${escapeShellArg (markdownIdsPath name syncConfig)}
-      ''}
-    '';
+    }
+  );
 
   # ── Builders ──────────────────────────────────────────────────────────
 
@@ -601,22 +591,7 @@ let
     optional m.sftp.disableHashcheck "sftp-disable-hashcheck"
     ++ optional (m.sftp.pathOverride != null) "sftp-path-override=${m.sftp.pathOverride}";
 
-  mkSftpArgs =
-    s:
-    optional s.sftp.disableHashcheck "--sftp-disable-hashcheck"
-    ++ optionals (s.sftp.pathOverride != null) [
-      "--sftp-path-override"
-      s.sftp.pathOverride
-    ];
-
   mkExcludeMountOpts = m: map (pat: "exclude=${pat}") m.excludes;
-
-  mkExcludeArgs =
-    s:
-    concatMap (pat: [
-      "--exclude"
-      pat
-    ]) s.excludes;
 
   mkGDriveMountOpts =
     m:
@@ -630,72 +605,101 @@ let
       ) "drive-root-folder-id=${m.googleDrive.rootFolderId}"
     );
 
-  mkGDriveBackendArgs =
-    s:
-    optionals s.googleDrive.enable (
-      [
-        "--drive-export-formats"
-        s.googleDrive.exportFormats
-        "--drive-import-formats"
-        s.googleDrive.importFormats
-      ]
-      ++ optional (
-        s.googleDrive.rootFolderId != null
-      ) "--drive-root-folder-id=${s.googleDrive.rootFolderId}"
-    );
-
-  mkGDriveSyncArgs =
-    s:
-    optionals s.googleDrive.enable [
-      "--fix-case"
-      "--slow-hash-sync-only"
-    ];
-
-  # Everything needed to reach the remote and see it as bisync does, minus the
-  # sync-only flags: the one-off rclone calls the markdown hooks make against
-  # the same remote share these with bisync itself.
-  mkRemoteArgs =
-    name: s:
-    mkSftpArgs s
-    ++ mkGDriveBackendArgs s
-    ++ optionals (s.configFile != null) [
-      "--config"
-      (stagedBisyncConfigPath name)
-    ];
-
-  # Derive the listing filename rclone bisync uses under <home>/.cache/rclone/bisync/.
-  # Must be a literal path: %h in system units resolves to the service
-  # *manager's* home (/root), not the User= of the unit.
-  # Caveat: rclone canonicalizes the remote before naming the listings, so
-  # for `alias` remotes (which resolve to their target) this derivation won't
-  # match and the initial resync would re-run on every sync.
-  bisyncListingPath =
-    s: n:
-    let
-      sanitize = p: builtins.replaceStrings [ ":" "/" " " ] [ "_" "_" "_" ] (removePrefix "/" p);
-    in
-    "${userHomeOf s.user}/.cache/rclone/bisync/${sanitize s.localPath}..${sanitize s.remote}.path${toString n}.lst";
-
-  # Identity snapshot of the markdown tree, for mirror_moves to recognise a
-  # renamed file by on the next run. Losing it only costs that one pairing pass.
-  markdownIdsPath = name: s: "${userHomeOf s.user}/.cache/rclone/markdown-sync/${name}.ids";
-
   # ── Mounts ────────────────────────────────────────────────────────────
 
   credMounts = filterAttrs (_name: m: m.configFile != null) cfg.mounts;
-  credBisyncs = filterAttrs (_name: s: s.configFile != null) cfg.bisyncs;
 
   # Writable staging copy so rclone can persist config changes (token
   # refreshes, etc.) that it cannot write to a read-only secret.
-  stagedConfigPath = name: "/run/rclone/${name}.conf";
+  stagingDir = "/run/rclone";
+  stagedConfigPath = name: "${stagingDir}/${name}.conf";
 
-  # Bisyncs get a private directory rather than a bare file: rclone rewrites a
-  # config by creating a temp file *alongside* it and renaming, so the parent
-  # directory has to be writable by the unit's User= too. LoadCredential can't
-  # serve this — $CREDENTIALS_DIRECTORY is read-only, which makes every OAuth
-  # token refresh fail with "Failed to save config after 10 tries".
-  stagedBisyncDir = name: "/run/rclone/bisync-${name}";
-  stagedBisyncConfigPath = name: "${stagedBisyncDir name}/rclone.conf";
+  # A bisync unit receives its config as a credential and the daemon copies it
+  # to its own RuntimeDirectory, a writable place rclone can persist OAuth token
+  # refreshes into (LoadCredential's directory is read-only, which makes every
+  # refresh fail with "Failed to save config after 10 tries").
+
+  # What the rclone-remotes binary reads. Its schema (src/config.rs) rejects
+  # unknown fields, and `validate` runs at build time (see system.checks), so a
+  # field added on one side only fails nixos-rebuild rather than being ignored.
+  daemonConfig = pkgs.writeText "rclone-remotes.json" (
+    builtins.toJSON {
+      kind = "global";
+      version = 1;
+      inherit stagingDir;
+      mounts = mapAttrs (_name: m: {
+        localPath = toString m.localPath;
+        unit = utils.escapeSystemdPath m.localPath;
+        configFile = m.configFile;
+      }) cfg.mounts;
+      mountReset.delay = cfg.mountResetDelay;
+    }
+  );
+
+  pairConfig =
+    name: s:
+    pkgs.writeText "rclone-remotes-${name}.json" (
+      builtins.toJSON {
+        kind = "pair";
+        version = 1;
+        inherit name;
+        rclone = getExe cfg.rclonePackage;
+        inherit (s) remote workdir excludes;
+        localPath = toString s.localPath;
+        configCredential = s.configFile != null;
+        googleDrive =
+          if s.googleDrive.enable then
+            {
+              inherit (s.googleDrive) exportFormats importFormats rootFolderId;
+            }
+          else
+            null;
+        sftp = {
+          inherit (s.sftp) pathOverride disableHashcheck;
+        };
+        pull = {
+          inherit (s.pull) interval onBoot jitter;
+        };
+        conflict = {
+          inherit (s.conflict) resolve loser;
+        };
+        bisync = {
+          inherit (s)
+            compare
+            resilient
+            recover
+            createEmptySrcDirs
+            maxLock
+            maxDelete
+            extraParams
+            ;
+        };
+        settle = {
+          inherit (s.settle) enable delay;
+        };
+        push = {
+          inherit (s.push) enable debounce;
+        };
+        markdownSync =
+          if s.markdownSync.enable then
+            {
+              path = toString s.markdownSync.path;
+              inherit (s.markdownSync) syncDeletions trackMoves referenceDoc;
+            }
+          else
+            null;
+      }
+    );
+
+  validatedDaemonConfig =
+    pkgs.runCommand "rclone-remotes-config-check" { nativeBuildInputs = [ cfg.package ]; }
+      ''
+        rclone-remotes validate --config ${daemonConfig}
+        ${concatStringsSep "\n" (
+          mapAttrsToList (name: s: "rclone-remotes validate --config ${pairConfig name s}") cfg.bisyncs
+        )}
+        touch $out
+      '';
 
   # The rclone mount helper (mount.rclone, via system.fsPackages) translates
   # `opt=value` mount options into `--opt=value` flags. systemd runs mount
@@ -776,106 +780,40 @@ let
 
   # ── Bisync services ───────────────────────────────────────────────────
 
-  mkBisyncExec =
-    name: scriptName: s: initArgs:
-    let
-      argv = [
-        (getExe pkgs.rclone)
-        "bisync"
-        s.localPath
-        s.remote
-      ]
-      ++ initArgs
-      ++ s.baseArgs
-      ++ [
-        "--conflict-resolve"
-        s.conflictResolve
-        "--conflict-loser"
-        s.conflictLoser
-      ]
-      ++ mkExcludeArgs s
-      ++ mkGDriveSyncArgs s
-      ++ mkRemoteArgs name s
-      ++ s.extraArgs;
-    in
-    pkgs.writeShellScript scriptName ''
-      exec ${escapeShellArgs argv}
-    '';
-
-  mkBisyncInitService =
+  # One long-running daemon per pair (replacing the oneshot + timer + init
+  # trio): it owns a private rclone rcd, pulls on its own schedule, and answers
+  # `rclone-remotes ctl --name <name>`.
+  mkPairService =
     name: s:
-    nameValuePair "rclone-bisync-${name}-init" {
-      description = "Initial resync for rclone bisync ${name}";
-      after = [ "network-online.target" ] ++ optional (s.configFile != null) "rclone-config.service";
-      wants = [ "network-online.target" ];
-      requires = optional (s.configFile != null) "rclone-config.service";
-      # requiredBy (not wantedBy): a failed initial resync must block the
-      # main sync instead of letting it fail confusingly on missing listings.
-      requiredBy = [ "rclone-bisync-${name}.service" ];
-      before = [ "rclone-bisync-${name}.service" ];
-      unitConfig.ConditionPathExists = "!${bisyncListingPath s 1}";
-      path = serviceEnvPackages;
-      serviceConfig = {
-        Type = "oneshot";
-        User = s.user;
-        Group = s.group;
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}";
-        ExecStart = mkBisyncExec name "rclone-bisync-${name}-init" s [
-          "--resync"
-          "--resync-mode"
-          "newer"
-        ];
-      };
-    };
-
-  mkBisyncService =
-    name: s:
-    let
-      bisyncExec = mkBisyncExec name "rclone-bisync-${name}" s [ ];
-    in
     nameValuePair "rclone-bisync-${name}" {
       description = "Rclone bisync for ${name}";
-      after = [ "network-online.target" ] ++ optional (s.configFile != null) "rclone-config.service";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      requires = optional (s.configFile != null) "rclone-config.service";
-      path = flatten [
-        serviceEnvPackages
-        (optionals s.markdownSync.enable [ pkgs.pandoc ])
-      ];
+      restartTriggers = [ (pairConfig name s) ];
+      path = serviceEnvPackages;
       serviceConfig = {
-        Type = "oneshot";
+        Type = "notify";
+        NotifyAccess = "main";
         User = s.user;
         Group = s.group;
-        ExecStartPre = [
-          "${pkgs.coreutils}/bin/mkdir -p ${escapeShellArg s.localPath}"
-        ]
-        ++ optional s.markdownSync.enable "${mkMarkdownPreSync name s}";
-        # Type=oneshot runs multiple ExecStart= lines in sequence, and the
-        # Pre/Post hooks bracket all of them — so the markdown conversion still
-        # happens exactly once per run, with both bisync passes inside it.
-        # The settle pass is prefixed "-" (non-fatal): it is an optimisation,
-        # and a transient failure there must not fail a run whose first pass
-        # succeeded, nor skip the post-sync conversion.
-        ExecStart = [ "${bisyncExec}" ]
-        ++ optionals s.settlePass.enable [
-          "${pkgs.coreutils}/bin/sleep ${toString s.settlePass.delay}"
-          "-${bisyncExec}"
-        ];
-        ExecStartPost = optional s.markdownSync.enable "${mkMarkdownPostSync name s}";
-        # No Restart=: the timer is the retry mechanism. A bisync failure
-        # that needs --resync would otherwise loop uselessly.
-      };
-    };
-
-  mkBisyncTimer =
-    name: s:
-    nameValuePair "rclone-bisync-${name}" {
-      description = "Timer for rclone bisync ${name}";
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnBootSec = s.onBootSec;
-        OnUnitActiveSec = s.interval;
-        RandomizedDelaySec = "5m";
+        ExecStart = "${rcloneRemotes} run --config ${pairConfig name s}";
+        LoadCredential = optional (s.configFile != null) "rclone.conf:${s.configFile}";
+        # Holds the rc and control sockets and the writable config copy; only
+        # the unit's own user may enter.
+        RuntimeDirectory = "rclone-remotes/${name}";
+        RuntimeDirectoryMode = "0700";
+        # What must survive a restart: renames not yet pushed, and which files
+        # were pushed since the last pull.
+        StateDirectory = "rclone-remotes/${name}";
+        StateDirectoryMode = "0700";
+        # rcd is a child of the daemon; a hung rcd stops the watchdog pings.
+        WatchdogSec = "5min";
+        # A failure the daemon cannot handle itself (rcd died) is retried; a
+        # sync that fails is the daemon's own business and does not exit.
+        Restart = "on-failure";
+        RestartSec = "30s";
+        TimeoutStopSec = "30s";
       };
     };
 
@@ -886,6 +824,40 @@ in
   options.services.rclone-remotes = {
 
     enable = mkEnableOption "rclone remote mounts and bisync services";
+
+    package = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ./nix/package.nix { };
+      defaultText = literalExpression "pkgs.callPackage ./nix/package.nix { }";
+      description = ''
+        The `rclone-remotes` binary that supervises bisync pairs, stages mount
+        configs and recovers stale mounts. Built with the consumer's own `pkgs`,
+        so binary-cache hits need the consumer's nixpkgs to match this flake's
+        locked one.
+      '';
+    };
+
+    binaryCache.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Fetch the `rclone-remotes` daemon from this project's public Cachix
+        cache (`nixos-rclone.cachix.org`) instead of compiling it. Lower
+        priority than cache.nixos.org. Hits need your nixpkgs to be this
+        flake's locked one (`nixpkgs.follows = "rclone-remotes/nixpkgs"`).
+      '';
+    };
+
+    rclonePackage = mkOption {
+      type = types.package;
+      default = pkgs.rclone;
+      defaultText = literalExpression "pkgs.rclone";
+      description = ''
+        The rclone used for FUSE mounts and, as a private `rclone rcd`, by every
+        bisync pair. The rc API the daemon speaks is that of rclone 1.75; a
+        different minor version works but is logged.
+      '';
+    };
 
     # ── Global defaults ─────────────────────────────────────────────────
     defaultConfigFile = mkOption {
@@ -928,7 +900,7 @@ in
     bisyncs = mkOption {
       type = types.attrsOf bisyncSubmodule;
       default = { };
-      description = "Attribute set of rclone bisync pairs (periodic two-way sync).";
+      description = "Attribute set of rclone bisync pairs: remote changes are pulled periodically.";
     };
 
     # ── Suspend / resume reset ──────────────────────────────────────────
@@ -956,57 +928,52 @@ in
     })
     {
 
-      assertions = mapAttrsToList (name: s: {
-        assertion = s.markdownSync.enable -> s.markdownSync.path != null;
-        message = "services.rclone-remotes.bisyncs.${name}.markdownSync.path must be set when markdownSync is enabled";
-      }) cfg.bisyncs;
+      assertions =
+        mapAttrsToList (name: s: {
+          assertion = s.markdownSync.enable -> s.markdownSync.path != null;
+          message = "services.rclone-remotes.bisyncs.${name}.markdownSync.path must be set when markdownSync is enabled";
+        }) cfg.bisyncs
+        ++ concatMap (s: s.assertions) (attrValues cfg.bisyncs);
 
-      environment.systemPackages = [ pkgs.rclone ];
+      warnings = concatMap (s: s.warnings) (attrValues cfg.bisyncs);
+
+      system.checks = [ validatedDaemonConfig ];
+
+      nix.settings = mkIf cfg.binaryCache.enable {
+        substituters = [ "https://nixos-rclone.cachix.org?priority=41" ];
+        trusted-public-keys = [ "nixos-rclone.cachix.org-1:y67XDcu9PSJL5n6GnU3Ju+PPCZh3JETrfwpxm9AndzE=" ];
+      };
+
+      environment.systemPackages = [
+        cfg.rclonePackage
+        cfg.package
+      ];
 
       # Provides the mount.rclone helper used by mount(8) for fsType "rclone".
-      system.fsPackages = [ pkgs.rclone ];
+      system.fsPackages = [ cfg.rclonePackage ];
 
       fileSystems = mapAttrs mkFilesystem cfg.mounts;
 
       systemd.services =
-        listToAttrs (mapAttrsToList mkBisyncService cfg.bisyncs)
-        // listToAttrs (mapAttrsToList mkBisyncInitService cfg.bisyncs)
-        // optionalAttrs (credMounts != { } || credBisyncs != { }) {
+        listToAttrs (mapAttrsToList mkPairService cfg.bisyncs)
+        // optionalAttrs (credMounts != { }) {
           # Stage credential-backed configs into a writable location: .mount
           # units cannot use LoadCredential, and rclone wants to persist token
           # refreshes, which a read-only secret would reject on every refresh.
           rclone-config = {
-            description = "Stage rclone configs for credential-backed mounts and bisyncs";
-            restartTriggers =
-              mapAttrsToList (_name: m: m.configFile) credMounts
-              ++ mapAttrsToList (_name: s: s.configFile) credBisyncs;
+            description = "Stage rclone configs for credential-backed mounts";
+            restartTriggers = [
+              daemonConfig
+            ]
+            ++ mapAttrsToList (_name: m: m.configFile) credMounts;
             serviceConfig = {
               Type = "oneshot";
               # Keep the unit active so RuntimeDirectory survives while mounts
-              # and bisyncs are using the staged configs.
+              # are using the staged configs.
               RemainAfterExit = true;
               RuntimeDirectory = "rclone";
-              # 0711, not 0700: bisync units run as their own User= and must
-              # traverse /run/rclone to reach their private staging directory.
-              # Traverse-only keeps the mount configs unlistable.
-              RuntimeDirectoryMode = "0711";
-              ExecStart = pkgs.writeShellScript "rclone-config-stage" (
-                ''
-                  set -euo pipefail
-                ''
-                + concatStringsSep "\n" (
-                  mapAttrsToList (
-                    name: m:
-                    "${pkgs.coreutils}/bin/install -m 600 ${escapeShellArg m.configFile} ${escapeShellArg (stagedConfigPath name)}"
-                  ) credMounts
-                  ++ flatten (
-                    mapAttrsToList (name: s: [
-                      "${pkgs.coreutils}/bin/install -d -m 700 -o ${escapeShellArg s.user} -g ${escapeShellArg s.group} ${escapeShellArg (stagedBisyncDir name)}"
-                      "${pkgs.coreutils}/bin/install -m 600 -o ${escapeShellArg s.user} -g ${escapeShellArg s.group} ${escapeShellArg s.configFile} ${escapeShellArg (stagedBisyncConfigPath name)}"
-                    ]) credBisyncs
-                  )
-                )
-              );
+              RuntimeDirectoryMode = "0700";
+              ExecStart = "${rcloneRemotes} stage-mount-configs --config ${daemonConfig}";
             };
           };
         }
@@ -1020,6 +987,8 @@ in
               "network-online.target"
             ];
             wants = [ "network-online.target" ];
+            # mount-reset runs `systemctl reset-failed`.
+            path = [ pkgs.systemd ];
             wantedBy = [
               "suspend.target"
               "hibernate.target"
@@ -1027,41 +996,10 @@ in
             ];
             serviceConfig = {
               Type = "oneshot";
-              ExecStartPre = "${pkgs.coreutils}/bin/sleep ${toString cfg.mountResetDelay}";
-              ExecStart = pkgs.writeShellScript "reset-rclone-mounts" (
-                ''
-                  set -u
-                ''
-                + concatStringsSep "\n" (
-                  mapAttrsToList (
-                    name: m:
-                    let
-                      unit = utils.escapeSystemdPath m.localPath;
-                      path = escapeShellArg m.localPath;
-                    in
-                    ''
-                      # ${name}: lazily unmount a stale FUSE mount (rclone died
-                      # uncleanly; the mount entry lingers and blocks remounting).
-                      # findmnt reads /proc/self/mountinfo and, unlike stat-based
-                      # checks, does not trigger an armed automount.
-                      fstype="$(${pkgs.util-linux}/bin/findmnt -n -o FSTYPE -M ${path} 2>/dev/null | ${pkgs.coreutils}/bin/tail -n1 || true)"
-                      if [ "$fstype" = "fuse.rclone" ] || [ "$fstype" = "rclone" ]; then
-                        if ! ${pkgs.coreutils}/bin/stat -t ${path} >/dev/null 2>&1; then
-                          ${pkgs.fuse3}/bin/fusermount3 -uz ${path} \
-                            || ${pkgs.util-linux}/bin/umount -l ${path} \
-                            || true
-                        fi
-                      fi
-                      ${pkgs.systemd}/bin/systemctl reset-failed ${unit}.mount ${unit}.automount 2>/dev/null || true
-                    ''
-                  ) cfg.mounts
-                )
-              );
+              ExecStart = "${rcloneRemotes} mount-reset --config ${daemonConfig}";
             };
           };
         };
-
-      systemd.timers = listToAttrs (mapAttrsToList mkBisyncTimer cfg.bisyncs);
 
       systemd.tmpfiles.rules =
         (mapAttrsToList mkTmpfile cfg.mounts)
