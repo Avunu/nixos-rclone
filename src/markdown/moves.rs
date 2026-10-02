@@ -177,6 +177,9 @@ pub fn pair(
         }
     }
 
+    // Passes find matches in the order of keys that include inode numbers, so
+    // sort: the result must not depend on which filesystem the files are on.
+    result.moves.sort_by(|a, b| a.from.cmp(&b.from));
     result.unpaired_orphans = orphans.into_iter().flatten().collect();
     result.unpaired_new = fresh.into_iter().flatten().collect();
     result
