@@ -892,6 +892,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "carta",
+ "carta-core",
  "clap",
  "filetime",
  "notify",
