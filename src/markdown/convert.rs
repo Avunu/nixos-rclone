@@ -29,9 +29,9 @@ const MARKDOWN: &str = "markdown+lists_without_preceding_blankline";
 
 /// Convert markdown text to a docx file.
 ///
-/// `reference` is an earlier docx of the same note: its styles, fonts and
-/// theme are reused, so formatting someone applied in Google Docs survives the
-/// next conversion.
+/// `reference` is an earlier docx of the same note: its styles, fonts, theme,
+/// page setup, headers and footers (page numbers) are reused, so formatting
+/// someone applied in Google Docs survives the next conversion.
 pub fn md_to_docx(markdown: &str, reference: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let (mut doc, media) = read_document(MARKDOWN, markdown.as_bytes(), &ReaderOptions::default())
         .map_err(|e| anyhow!("reading markdown: {e}"))?;
@@ -39,10 +39,18 @@ pub fn md_to_docx(markdown: &str, reference: Option<Vec<u8>>) -> Result<Vec<u8>>
 
     let mut opts = WriterOptions::default();
     opts.wrap = WrapMode::Preserve;
-    opts.docx.reference_doc = reference;
-    match render_document("docx", doc, media, &opts).map_err(|e| anyhow!("writing docx: {e}"))? {
-        Output::Bytes(b) => Ok(b),
-        Output::Text(_) => Err(anyhow!("docx writer returned text")),
+    opts.docx.reference_doc = reference.clone();
+    let bytes = match render_document("docx", doc, media, &opts)
+        .map_err(|e| anyhow!("writing docx: {e}"))?
+    {
+        Output::Bytes(b) => b,
+        Output::Text(_) => return Err(anyhow!("docx writer returned text")),
+    };
+    // carta takes only the styles from a reference; the page numbers, headers
+    // and page setup someone added in Google Docs are carried over here.
+    match reference {
+        Some(r) => crate::markdown::page::graft_page_setup(bytes, &r),
+        None => Ok(bytes),
     }
 }
 

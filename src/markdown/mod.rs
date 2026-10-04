@@ -4,3 +4,4 @@
 pub mod convert;
 pub mod mirror;
 pub mod moves;
+pub mod page;
