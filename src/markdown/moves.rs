@@ -351,8 +351,8 @@ mod tests {
     fn identity_pairs_a_file_renamed_and_edited_beyond_any_other_clue() {
         let t = Trees::new();
         let (s, d) = (t.s(), t.d());
-        t.mk(&s, "Statement on Gender Roles.md", ft(1_000, 0));
-        t.mk(&d, "Statement on Gender Roles.docx", ft(1_000, 0));
+        t.mk(&s, "Quarterly Report.md", ft(1_000, 0));
+        t.mk(&d, "Quarterly Report.docx", ft(1_000, 0));
         t.mk(&s, "Gone.md", ft(1_001, 0));
         t.mk(&d, "Gone.docx", ft(1_001, 0));
         // Last run: remember who was who.
@@ -361,12 +361,12 @@ mod tests {
 
         // Renamed, edited (new mtime, so mtime cannot pair it), new basename.
         fs::rename(
-            s.join("Statement on Gender Roles.md"),
-            s.join("Scriptural Basis of Godly Femininity and Masculinity.md"),
+            s.join("Quarterly Report.md"),
+            s.join("Annual Summary of Results and Outlook.md"),
         )
         .unwrap();
         set_file_mtime(
-            s.join("Scriptural Basis of Godly Femininity and Masculinity.md"),
+            s.join("Annual Summary of Results and Outlook.md"),
             ft(9_999, 0),
         )
         .unwrap();
@@ -376,11 +376,8 @@ mod tests {
 
         let p = t.pair(&prev);
         assert_eq!(
-            mv(&p, "Statement on Gender Roles"),
-            Some((
-                "Scriptural Basis of Godly Femininity and Masculinity".into(),
-                "identity"
-            ))
+            mv(&p, "Quarterly Report"),
+            Some(("Annual Summary of Results and Outlook".into(), "identity"))
         );
         assert_eq!(p.unpaired_orphans, ["Gone"]);
         assert_eq!(p.unpaired_new, ["Brand New"]);

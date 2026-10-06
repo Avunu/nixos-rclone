@@ -97,8 +97,8 @@ async fn a_listing_patched_by_us_is_accepted_by_rclone() {
     // daemon does, move the file on both sides, and have real bisync read our
     // edited listings and find nothing to do.
     let h = Harness::start(Options::default()).await;
-    let from = "Statement on \"Gender\" Roles \u{2013} caf\u{e9}.docx";
-    let to = "Archive/Scriptural Basis.docx";
+    let from = "Report on \"Quarterly\" Results \u{2013} caf\u{e9}.docx";
+    let to = "Archive/Annual Summary.docx";
     put(&h.local, from, "contents");
     put(&h.local, "keep.docx", "keep");
     h.sync_ok().await;
@@ -125,6 +125,6 @@ async fn a_listing_patched_by_us_is_accepted_by_rclone() {
     assert_eq!(common::tree(&h.local), common::tree(&h.remote));
     assert_eq!(
         common::tree(&h.local),
-        ["Archive/Scriptural Basis.docx", "keep.docx"]
+        ["Archive/Annual Summary.docx", "keep.docx"]
     );
 }
