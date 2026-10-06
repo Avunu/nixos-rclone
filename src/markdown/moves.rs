@@ -273,12 +273,12 @@ mod tests {
         // 1. relocated AND edited in transit -> paired by basename
         t.mk(
             &d,
-            "Mediation Plan - Shenk & Burkholder.docx",
+            "Project Plan - Alpha & Beta.docx",
             ft(1_734_833_944, 500_000_000),
         );
         t.mk(
             &s,
-            "Archive/Mediation Plan - Shenk & Burkholder.md",
+            "Archive/Project Plan - Alpha & Beta.md",
             ft(1_786_099_150, 900_000_000),
         );
         // 2. whole-directory move
@@ -290,12 +290,12 @@ mod tests {
         // 4. renamed AND relocated at once
         t.mk(
             &d,
-            "Notes from Ordination Discussion.docx",
+            "Notes from Planning Discussion.docx",
             ft(1_758_877_772, 700_000_000),
         );
         t.mk(
             &s,
-            "Archive/Ordination Notes.md",
+            "Archive/Planning Notes.md",
             ft(1_758_877_772, 700_000_000),
         );
         // 5/6. a real delete and a real create, which must NOT be paired
@@ -311,15 +311,12 @@ mod tests {
 
         let want = [
             (
-                "Mediation Plan - Shenk & Burkholder",
-                "Archive/Mediation Plan - Shenk & Burkholder",
+                "Project Plan - Alpha & Beta",
+                "Archive/Project Plan - Alpha & Beta",
             ),
             ("Proj/a", "Archive/Proj/a"),
             ("Old Name", "New Name"),
-            (
-                "Notes from Ordination Discussion",
-                "Archive/Ordination Notes",
-            ),
+            ("Notes from Planning Discussion", "Archive/Planning Notes"),
             ("x/Dup", "p/Dup"),
             ("y/Dup", "q/Dup"),
         ];
