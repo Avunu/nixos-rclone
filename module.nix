@@ -84,7 +84,7 @@ let
         fails on paths that transfer perfectly well:
 
         ```
-        ERROR : Legal/Scholars Fund.pdf: Failed to calculate src hash:
+        ERROR : Legal/Annual Report.pdf: Failed to calculate src hash:
           failed to calculate md5 hash: failed to run "md5sum /document/Legal/...":
           md5sum: '/document/Legal/...': No such file or directory
         ```

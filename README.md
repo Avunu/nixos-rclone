@@ -1,4 +1,4 @@
-# rclone-nixos-module
+# nixos-rclone
 
 A NixOS module, backed by a small Rust daemon (`rclone-remotes`), providing:
 
@@ -156,7 +156,7 @@ services.rclone-remotes.bisyncs.obsidian = {
 
   googleDrive = {
     enable = true;
-    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # optional
+    rootFolderId = "YOUR_DRIVE_FOLDER_ID";  # optional
   };
 
   markdownSync = {
@@ -234,7 +234,7 @@ services.rclone-remotes.mounts.gdrive = {
 
   googleDrive = {
     enable = true;
-    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # omit to mount entire Drive
+    rootFolderId = "YOUR_DRIVE_FOLDER_ID";  # omit to mount entire Drive
     exportFormats = "docx";  # default — Google Docs appear as .docx
     importFormats = "docx";  # default — .docx uploads convert to Google Docs
   };
@@ -274,7 +274,7 @@ services.rclone-remotes.bisyncs.gdocs = {
 
   googleDrive = {
     enable = true;
-    rootFolderId = "AMa5T4yt9apUd24z_671iTMA5a_I4Hra6";  # omit to sync entire Drive
+    rootFolderId = "YOUR_DRIVE_FOLDER_ID";  # omit to sync entire Drive
     exportFormats = "docx";  # default
     importFormats = "docx";  # default
   };
@@ -299,7 +299,7 @@ share as `/document` over SFTP while the shell knows it as
 check on every run:
 
 ```
-ERROR : Home & Family/.../Keystone Scholars Fund.pdf: Failed to calculate src hash:
+ERROR : Home & Family/.../Annual Report.pdf: Failed to calculate src hash:
   failed to calculate md5 hash: failed to run "md5sum /document/Home\ \&\ Family/...":
   md5sum: '/document/Home & Family/...': No such file or directory
 ```
@@ -311,7 +311,7 @@ changes that. Give rclone the translation instead:
 ```nix
 services.rclone-remotes.bisyncs.documents = {
   remote = "nas:/document";
-  localPath = "/home/kevin/Documents";
+  localPath = "/home/user/Documents";
   sftp.pathOverride = "@/volume1";
 };
 ```
@@ -526,4 +526,4 @@ The integration tests (`tests/`) run the real daemon against a real
 
 ## License
 
-MIT
+[MIT](LICENSE), Copyright (c) 2026 Avunu LLC.
