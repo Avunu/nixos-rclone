@@ -50,7 +50,7 @@ let
       type = types.nullOr types.str;
       default = null;
       description = "Restrict to a specific Google Drive folder ID.";
-      example = "14zaHa9I5dpMa4AaUTt_Mi7r2_AyT6654";
+      example = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
     };
 
     exportFormats = mkOption {

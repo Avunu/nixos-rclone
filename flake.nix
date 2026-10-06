@@ -254,15 +254,15 @@
               with subtest("markdownSync: a vault rename renames the remote file, not delete + create"):
                   vault = "/home/alice/vault"
                   remote = "/srv/remote-data/notes"
-                  for name in ["Statement on Gender Roles", "Draft", "Other"]:
+                  for name in ["Quarterly Report", "Draft", "Other"]:
                       machine.succeed(f"sudo -u alice sh -c 'echo \"# {name}\" > \"{vault}/{name}.md\"'")
                   ctl("notes", "sync")
-                  machine.succeed(f"test -f '{remote}/Statement on Gender Roles.docx'")
+                  machine.succeed(f"test -f '{remote}/Quarterly Report.docx'")
                   # A server-side move on a local remote is rename(2), so the
                   # remote file keeps its inode only if it was really renamed.
-                  ino = machine.succeed(f"stat -c %i '{remote}/Statement on Gender Roles.docx'").strip()
+                  ino = machine.succeed(f"stat -c %i '{remote}/Quarterly Report.docx'").strip()
 
-                  machine.succeed(f"sudo -u alice mv '{vault}/Statement on Gender Roles.md' '{vault}/Scriptural Basis.md'")
+                  machine.succeed(f"sudo -u alice mv '{vault}/Quarterly Report.md' '{vault}/Annual Summary.md'")
                   # Renamed *and* edited: only the identity pass can pair it.
                   machine.succeed(f"sudo -u alice mv '{vault}/Draft.md' '{vault}/Final.md'")
                   machine.succeed(f"sudo -u alice sh -c 'echo edited >> {vault}/Final.md'")
@@ -271,12 +271,12 @@
 
                   run = machine.succeed(f"journalctl -o cat -u rclone-bisync-notes.service --since @{since}")
                   print(run)
-                  assert "followed move" in run and "Scriptural Basis.docx" in run, "the rename was not followed"
+                  assert "followed move" in run and "Annual Summary.docx" in run, "the rename was not followed"
                   assert "Final.docx" in run
                   assert "Queue delete" not in run, "bisync replayed a rename as delete + create"
-                  new = machine.succeed(f"stat -c %i '{remote}/Scriptural Basis.docx'").strip()
+                  new = machine.succeed(f"stat -c %i '{remote}/Annual Summary.docx'").strip()
                   assert new == ino, f"remote file was replaced (inode {ino} -> {new}), not renamed"
-                  machine.fail(f"test -e '{remote}/Statement on Gender Roles.docx'")
+                  machine.fail(f"test -e '{remote}/Quarterly Report.docx'")
                   machine.fail(f"test -e '{remote}/Draft.docx'")
                   machine.succeed(f"test -f '{remote}/Final.docx'")
                   machine.succeed(f"test -f '{vault}/Final.md'")
