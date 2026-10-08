@@ -21,7 +21,10 @@ jobs:
     # The pull request's author, not `github.actor`: the actor is whoever
     # triggered this run, and a human re-running it on a Dependabot PR would
     # otherwise be treated like the bot.
-    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    # Updates of the documentation site's packages (docs-site/) and of the commit pin of its shared
+    # workflows (github-actions pull requests) are reviewed by a person: a merge to the default branch
+    # publishes the site.
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && !startsWith(github.head_ref, 'dependabot/npm_and_yarn/docs-site') && !startsWith(github.head_ref, 'dependabot/github_actions/') }}
     steps:
       - name: Enable auto-merge
         run: gh pr merge --auto --squash "$PR_URL"

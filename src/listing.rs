@@ -386,7 +386,7 @@ mod tests {
     use super::*;
 
     const HEADER: &str = "# bisync listing v1 from 2026-10-02T13:13:35.123456789+0000\n";
-    const A: &str = "-        1234 md5:378840336ab14afa9c6b8d887e68a340 - 2026-01-01T00:00:00.000000000+0000 \"Statement on Gender Roles.docx\"\n";
+    const A: &str = "-        1234 md5:378840336ab14afa9c6b8d887e68a340 - 2026-01-01T00:00:00.000000000+0000 \"Quarterly Report.docx\"\n";
     const B: &str =
         "-           3 - - 2026-01-02T03:04:05.123456789+0000 \"Sub Dir/Nested.docx\"\n";
 
@@ -397,14 +397,14 @@ mod tests {
         assert_eq!(l.to_text(), text);
         assert_eq!(
             l.paths().collect::<Vec<_>>(),
-            ["Statement on Gender Roles.docx", "Sub Dir/Nested.docx"]
+            ["Quarterly Report.docx", "Sub Dir/Nested.docx"]
         );
     }
 
     #[test]
     fn reads_size_and_time() {
         let l = Listing::parse(&format!("{HEADER}{A}{B}"));
-        let a = l.stat("Statement on Gender Roles.docx").unwrap();
+        let a = l.stat("Quarterly Report.docx").unwrap();
         assert_eq!(a.size, 1234);
         // 2026-01-01T00:00:00Z
         assert_eq!(a.mtime_ns, 1_767_225_600 * 1_000_000_000);
@@ -453,7 +453,7 @@ mod tests {
         let mut l = Listing::parse(&format!("{HEADER}{A}"));
         assert_eq!(l.rename("nope.docx", "x.docx"), Some(false));
         assert!(!l.remove("nope.docx"));
-        assert!(l.remove("Statement on Gender Roles.docx"));
+        assert!(l.remove("Quarterly Report.docx"));
         assert_eq!(l.to_text(), HEADER);
     }
 
@@ -486,7 +486,7 @@ mod tests {
     fn unknown_lines_are_preserved() {
         let text = format!("{HEADER}garbage line\n{A}");
         let mut l = Listing::parse(&text);
-        l.remove("Statement on Gender Roles.docx");
+        l.remove("Quarterly Report.docx");
         assert_eq!(l.to_text(), format!("{HEADER}garbage line\n"));
     }
 

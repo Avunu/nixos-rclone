@@ -87,30 +87,30 @@ async fn a_new_note_reaches_the_remote_at_once() {
 async fn a_renamed_note_is_a_server_side_move_of_its_docx() {
     let h = synced(
         LIVE,
-        &[("Statement on Roles.md", "# S\n"), ("keep.md", "# K\n")],
+        &[("Report on Results.md", "# S\n"), ("keep.md", "# K\n")],
     )
     .await;
-    let ino = inode(&h.remote, "Statement on Roles.docx").unwrap();
+    let ino = inode(&h.remote, "Report on Results.docx").unwrap();
 
     fs::rename(
-        h.vault.join("Statement on Roles.md"),
-        h.vault.join("Scriptural Basis.md"),
+        h.vault.join("Report on Results.md"),
+        h.vault.join("Annual Summary.md"),
     )
     .unwrap();
     h.eventually("renamed docx on the remote", || {
-        h.remote.join("Scriptural Basis.docx").exists()
-            && !h.remote.join("Statement on Roles.docx").exists()
+        h.remote.join("Annual Summary.docx").exists()
+            && !h.remote.join("Report on Results.docx").exists()
     })
     .await;
     // The same remote file, not a new upload: on Google Drive, the same file
     // ID, sharing and history.
-    assert_eq!(inode(&h.remote, "Scriptural Basis.docx"), Some(ino));
+    assert_eq!(inode(&h.remote, "Annual Summary.docx"), Some(ino));
 
     // And the next pull leaves it alone, and brings no duplicate back.
     h.sync_ok().await;
-    assert_eq!(inode(&h.remote, "Scriptural Basis.docx"), Some(ino));
-    assert_eq!(tree(&h.remote), ["Scriptural Basis.docx", "keep.docx"]);
-    assert_eq!(tree(&h.vault), ["Scriptural Basis.md", "keep.md"]);
+    assert_eq!(inode(&h.remote, "Annual Summary.docx"), Some(ino));
+    assert_eq!(tree(&h.remote), ["Annual Summary.docx", "keep.docx"]);
+    assert_eq!(tree(&h.vault), ["Annual Summary.md", "keep.md"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

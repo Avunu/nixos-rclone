@@ -273,12 +273,12 @@ mod tests {
         // 1. relocated AND edited in transit -> paired by basename
         t.mk(
             &d,
-            "Mediation Plan - Shenk & Burkholder.docx",
+            "Project Plan - Alpha & Beta.docx",
             ft(1_734_833_944, 500_000_000),
         );
         t.mk(
             &s,
-            "Archive/Mediation Plan - Shenk & Burkholder.md",
+            "Archive/Project Plan - Alpha & Beta.md",
             ft(1_786_099_150, 900_000_000),
         );
         // 2. whole-directory move
@@ -290,12 +290,12 @@ mod tests {
         // 4. renamed AND relocated at once
         t.mk(
             &d,
-            "Notes from Ordination Discussion.docx",
+            "Notes from Planning Discussion.docx",
             ft(1_758_877_772, 700_000_000),
         );
         t.mk(
             &s,
-            "Archive/Ordination Notes.md",
+            "Archive/Planning Notes.md",
             ft(1_758_877_772, 700_000_000),
         );
         // 5/6. a real delete and a real create, which must NOT be paired
@@ -311,15 +311,12 @@ mod tests {
 
         let want = [
             (
-                "Mediation Plan - Shenk & Burkholder",
-                "Archive/Mediation Plan - Shenk & Burkholder",
+                "Project Plan - Alpha & Beta",
+                "Archive/Project Plan - Alpha & Beta",
             ),
             ("Proj/a", "Archive/Proj/a"),
             ("Old Name", "New Name"),
-            (
-                "Notes from Ordination Discussion",
-                "Archive/Ordination Notes",
-            ),
+            ("Notes from Planning Discussion", "Archive/Planning Notes"),
             ("x/Dup", "p/Dup"),
             ("y/Dup", "q/Dup"),
         ];
@@ -354,8 +351,8 @@ mod tests {
     fn identity_pairs_a_file_renamed_and_edited_beyond_any_other_clue() {
         let t = Trees::new();
         let (s, d) = (t.s(), t.d());
-        t.mk(&s, "Statement on Gender Roles.md", ft(1_000, 0));
-        t.mk(&d, "Statement on Gender Roles.docx", ft(1_000, 0));
+        t.mk(&s, "Quarterly Report.md", ft(1_000, 0));
+        t.mk(&d, "Quarterly Report.docx", ft(1_000, 0));
         t.mk(&s, "Gone.md", ft(1_001, 0));
         t.mk(&d, "Gone.docx", ft(1_001, 0));
         // Last run: remember who was who.
@@ -364,12 +361,12 @@ mod tests {
 
         // Renamed, edited (new mtime, so mtime cannot pair it), new basename.
         fs::rename(
-            s.join("Statement on Gender Roles.md"),
-            s.join("Scriptural Basis of Godly Femininity and Masculinity.md"),
+            s.join("Quarterly Report.md"),
+            s.join("Annual Summary of Results and Outlook.md"),
         )
         .unwrap();
         set_file_mtime(
-            s.join("Scriptural Basis of Godly Femininity and Masculinity.md"),
+            s.join("Annual Summary of Results and Outlook.md"),
             ft(9_999, 0),
         )
         .unwrap();
@@ -379,11 +376,8 @@ mod tests {
 
         let p = t.pair(&prev);
         assert_eq!(
-            mv(&p, "Statement on Gender Roles"),
-            Some((
-                "Scriptural Basis of Godly Femininity and Masculinity".into(),
-                "identity"
-            ))
+            mv(&p, "Quarterly Report"),
+            Some(("Annual Summary of Results and Outlook".into(), "identity"))
         );
         assert_eq!(p.unpaired_orphans, ["Gone"]);
         assert_eq!(p.unpaired_new, ["Brand New"]);

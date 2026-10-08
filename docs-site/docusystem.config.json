@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/@avunu/docusystem/config.schema.json",
+  "name": "nixos-rclone",
+  "tagline": "A NixOS module and Rust daemon for rclone mounts and two-way sync that pushes local changes in seconds, with Markdown-to-docx conversion built in.",
+  "slug": "nixos-rclone",
+  "platform": "nixos",
+  "repo": "https://github.com/Avunu/nixos-rclone",
+  "domain": "nixos-rclone.avunu.net",
+  "license": "MIT"
+}

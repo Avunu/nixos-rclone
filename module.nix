@@ -50,7 +50,7 @@ let
       type = types.nullOr types.str;
       default = null;
       description = "Restrict to a specific Google Drive folder ID.";
-      example = "14zaHa9I5dpMa4AaUTt_Mi7r2_AyT6654";
+      example = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
     };
 
     exportFormats = mkOption {
@@ -84,7 +84,7 @@ let
         fails on paths that transfer perfectly well:
 
         ```
-        ERROR : Legal/Scholars Fund.pdf: Failed to calculate src hash:
+        ERROR : Legal/Annual Report.pdf: Failed to calculate src hash:
           failed to calculate md5 hash: failed to run "md5sum /document/Legal/...":
           md5sum: '/document/Legal/...': No such file or directory
         ```

@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 carta = { version = "=0.0.10", default-features = false, features = ["read-commonmark", "read-docx", "write-docx", "write-markdown"] }
+carta-core = "=0.0.10"
 clap = { version = "4", features = ["derive", "env"] }
 filetime = "0.2"
 notify = "8"
