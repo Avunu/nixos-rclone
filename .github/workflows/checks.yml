@@ -55,7 +55,7 @@ jobs:
       matrix:
         include:
           - system: x86_64-linux
-            runner: ubuntu-latest
+            runner: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","nixos"]') }}
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
@@ -64,9 +64,11 @@ jobs:
       # the default has the installer try to log into FlakeHub on a repo that
       # isn't registered there.
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        if: runner.environment == 'github-hosted'
         with:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
 
@@ -87,13 +89,14 @@ jobs:
 
   vm:
     name: vm
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","nixos"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # NixOS VM tests need /dev/kvm, which is present on Linux runners but not
       # world-accessible by default.
       - name: Enable KVM
+        if: runner.environment == 'github-hosted'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -101,9 +104,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        if: runner.environment == 'github-hosted'
         with:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
       - name: nix flake check
@@ -112,19 +117,25 @@ jobs:
   cache:
     name: cache (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
+    # The installer step that sets these is skipped on the self-hosted runner.
+    env:
+      NIX_CONFIG: |
+        accept-flake-config = true
+        narinfo-cache-negative-ttl = 0
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - system: x86_64-linux
-            runner: ubuntu-latest
+            runner: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","nixos"]') }}
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        if: runner.environment == 'github-hosted'
         with:
           determinate: false
           # flake.nix declares the project cache in `nixConfig`; accepting it
@@ -136,8 +147,17 @@ jobs:
             narinfo-cache-negative-ttl = 0
 
       - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
+
+      # cachix-action installs `cachix` into the Nix user profile; on the
+      # self-hosted runner no installer step has put that profile on PATH.
+      - name: Put the Nix user profile on PATH
+        if: runner.environment == 'self-hosted'
+        run: |
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+          echo "${XDG_STATE_HOME:-$HOME/.local/state}/nix/profile/bin" >> "$GITHUB_PATH"
 
       # Installs the `cachix` binary and configures the cache as a substituter.
       # Pushing is deliberately NOT delegated to this action: its daemon mode
