@@ -342,6 +342,8 @@ let
               How long the tree must be quiet before a burst of changes is
               pushed (systemd time-span syntax, at least 100ms). Longer values
               keep a file still being written from being uploaded half done.
+              Changes that come less than this long after the last are part of
+              the same burst, which is held for at most four times this long.
             '';
           };
         };
