@@ -235,6 +235,29 @@ async fn a_burst_of_deletions_is_left_to_the_pull() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_burst_that_spans_a_watcher_tick_is_still_one_burst() {
+    // The watcher expires each event on its own clock and flushes on ticks a
+    // quarter of the debounce (75 ms here) apart, so deletions spread over
+    // more than a tick come out as more than one batch, however the ticks fall.
+    // Pushed as they arrive, the pieces are each small enough to go out; the
+    // pushes have to wait for the burst to be over.
+    let names: Vec<String> = (0..20).map(|i| format!("f{i:02}.txt")).collect();
+    let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x")).collect();
+    let h = synced(&files).await;
+
+    // 18 of 20 in chunks of five, 40 ms apart: about 120 ms from first to last.
+    for chunk in names[..18].chunks(5) {
+        for n in chunk {
+            fs::remove_file(h.local.join(n)).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(tree(&h.remote).len(), 20, "part of a burst was pushed");
+    assert_eq!(h.ctl(Request::Status).await.status.pushed.deleted, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn names_rclone_would_encode_wait_for_the_pull_and_arrive_intact() {
     // rclone calls a tab in a name U+2409, and the daemon does not translate:
     // such a file is left to the pull, which does.

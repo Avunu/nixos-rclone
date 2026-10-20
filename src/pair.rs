@@ -68,6 +68,48 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 /// finds out. Shortly, so a burst that overflowed the queue has finished.
 const RESCAN_DELAY: Duration = Duration::from_secs(5);
 
+/// The watcher expires every event on its own clock and looks for expired ones
+/// once per tick (a quarter of the debounce), so one burst of changes can come
+/// out as several batches a tick or two apart. Pushed one by one, a burst is
+/// judged piecemeal: the early part of an `rm -rf` is deleted remotely before
+/// the storm guard has seen enough of it to withhold it.
+///
+/// Two flushes less than a whole debounce apart mean the tree was not quiet for
+/// a debounce in between, which is what the option promises before anything is
+/// pushed. So after a batch, keep merging until nothing more arrives for that
+/// long. (A whole debounce, not a tick or two: a watcher thread that is
+/// descheduled for a moment on a busy host must not cut a burst in two.)
+fn burst_gap(debounce: Duration) -> Duration {
+    debounce
+}
+
+/// The longest a burst is held back in all, so that a file written without
+/// pause cannot keep every push waiting for ever.
+fn burst_cap(debounce: Duration) -> Duration {
+    debounce * 4
+}
+
+/// `first`, plus every batch that follows closely enough to be the same burst.
+async fn coalesce(
+    first: Normalized,
+    rx: &mut mpsc::UnboundedReceiver<Normalized>,
+    debounce: Duration,
+) -> Normalized {
+    let mut burst = first;
+    let give_up = Instant::now() + burst_cap(debounce);
+    loop {
+        let wait = burst_gap(debounce).min(give_up.saturating_duration_since(Instant::now()));
+        if wait.is_zero() {
+            return burst;
+        }
+        match tokio::time::timeout(wait, rx.recv()).await {
+            Ok(Some(more)) => burst.merge(more),
+            // Quiet for long enough, or the watcher is gone.
+            Ok(None) | Err(_) => return burst,
+        }
+    }
+}
+
 struct Pair {
     cfg: PairConfig,
     rc: Arc<Rc>,
@@ -252,6 +294,7 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
 
     let mut next = Instant::now() + pair.cfg.pull_on_boot() + jitter(pair.cfg.pull_jitter());
     let far = Duration::from_secs(86_400 * 365);
+    let debounce = pair.cfg.push_debounce();
     let outcome = loop {
         tokio::select! {
             _ = tokio::time::sleep_until(next) => {
@@ -266,7 +309,10 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
             }
             Some(n) = events.recv() => {
                 tokio::select! {
-                    _ = pair.on_events(n) => {}
+                    _ = async {
+                        let burst = coalesce(n, &mut events, debounce).await;
+                        pair.on_events(burst).await;
+                    } => {}
                     _ = &mut stop => break Ok(()),
                 }
             }
@@ -799,5 +845,98 @@ async fn watchdog(sock: PathBuf, period: Duration) {
         {
             let _ = sd_notify::notify(&[NotifyState::Watchdog]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEBOUNCE: Duration = Duration::from_secs(2);
+
+    fn batch(path: &str) -> Normalized {
+        Normalized {
+            changes: vec![Change::Dirty(path.into())],
+            rescan: false,
+        }
+    }
+
+    fn paths(n: &Normalized) -> Vec<&str> {
+        n.changes
+            .iter()
+            .map(|c| match c {
+                Change::Dirty(p) => p.as_str(),
+                Change::Rename { to, .. } => to.as_str(),
+            })
+            .collect()
+    }
+
+    /// Send each batch `after` its predecessor, from a task of its own.
+    fn feed(tx: mpsc::UnboundedSender<Normalized>, batches: Vec<(Duration, &'static str)>) {
+        tokio::spawn(async move {
+            for (after, path) in batches {
+                tokio::time::sleep(after).await;
+                if tx.send(batch(path)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batches_a_tick_or_two_apart_are_one_burst() {
+        // What a watcher does to 18 files deleted in a row when a tick lands in
+        // the middle: the rest of them arrive in a second batch.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = Instant::now();
+        feed(
+            tx.clone(),
+            vec![
+                (Duration::from_millis(500), "second"),
+                (Duration::from_millis(900), "third"),
+            ],
+        );
+        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
+        assert_eq!(paths(&burst), ["first", "second", "third"]);
+        // Held until a whole debounce passed after the last one (the watcher is
+        // still there: `tx` is alive).
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_millis(500 + 900) + DEBOUNCE
+        );
+        drop(tx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_after_a_quiet_gap_is_the_next_burst() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = Instant::now();
+        feed(tx, vec![(Duration::from_millis(2500), "later")]);
+        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
+        assert_eq!(paths(&burst), ["first"]);
+        assert_eq!(started.elapsed(), burst_gap(DEBOUNCE));
+        assert_eq!(paths(&rx.recv().await.unwrap()), ["later"], "kept for next");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_that_never_stops_is_cut_off() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = Instant::now();
+        // A batch every 250 ms, for far longer than the cap.
+        feed(tx, vec![(Duration::from_millis(250), "again"); 100]);
+        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
+        assert_eq!(started.elapsed(), burst_cap(DEBOUNCE));
+        assert!(burst.changes.len() > 2, "merged what arrived meanwhile");
+        assert!(burst.changes.len() < 100, "but not everything");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_channel_returns_what_there_is() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        drop(tx);
+        let started = Instant::now();
+        let burst = coalesce(batch("only"), &mut rx, DEBOUNCE).await;
+        assert_eq!(paths(&burst), ["only"]);
+        assert_eq!(started.elapsed(), Duration::ZERO, "no waiting on nobody");
     }
 }
