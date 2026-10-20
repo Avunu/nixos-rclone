@@ -89,24 +89,31 @@ fn burst_cap(debounce: Duration) -> Duration {
     debounce * 4
 }
 
-/// `first`, plus every batch that follows closely enough to be the same burst.
-async fn coalesce(
-    first: Normalized,
-    rx: &mut mpsc::UnboundedReceiver<Normalized>,
-    debounce: Duration,
-) -> Normalized {
-    let mut burst = first;
-    let give_up = Instant::now() + burst_cap(debounce);
-    loop {
-        let wait = burst_gap(debounce).min(give_up.saturating_duration_since(Instant::now()));
-        if wait.is_zero() {
-            return burst;
+/// A burst of local changes, gathered before it is pushed. The loop keeps it
+/// beside its other timers rather than waiting for it in place: a pull, a
+/// `ctl` request or a change in the vault must not be made to wait behind it.
+struct Burst {
+    changes: Normalized,
+    /// Push once nothing more has arrived by then...
+    quiet_at: Instant,
+    /// ...and at the latest by then.
+    due_at: Instant,
+}
+
+impl Burst {
+    fn start(first: Normalized, debounce: Duration) -> Self {
+        let due_at = Instant::now() + burst_cap(debounce);
+        Burst {
+            changes: first,
+            quiet_at: (Instant::now() + burst_gap(debounce)).min(due_at),
+            due_at,
         }
-        match tokio::time::timeout(wait, rx.recv()).await {
-            Ok(Some(more)) => burst.merge(more),
-            // Quiet for long enough, or the watcher is gone.
-            Ok(None) | Err(_) => return burst,
-        }
+    }
+
+    /// Another batch: the same burst, which is quiet again only later.
+    fn add(&mut self, more: Normalized, debounce: Duration) {
+        self.changes.merge(more);
+        self.quiet_at = (Instant::now() + burst_gap(debounce)).min(self.due_at);
     }
 }
 
@@ -295,6 +302,7 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
     let mut next = Instant::now() + pair.cfg.pull_on_boot() + jitter(pair.cfg.pull_jitter());
     let far = Duration::from_secs(86_400 * 365);
     let debounce = pair.cfg.push_debounce();
+    let mut burst: Option<Burst> = None;
     let outcome = loop {
         tokio::select! {
             _ = tokio::time::sleep_until(next) => {
@@ -308,12 +316,18 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
                 next = Instant::now() + pair.cfg.pull_interval() + jitter(pair.cfg.pull_jitter());
             }
             Some(n) = events.recv() => {
-                tokio::select! {
-                    _ = async {
-                        let burst = coalesce(n, &mut events, debounce).await;
-                        pair.on_events(burst).await;
-                    } => {}
-                    _ = &mut stop => break Ok(()),
+                match burst.as_mut() {
+                    Some(b) => b.add(n, debounce),
+                    None => burst = Some(Burst::start(n, debounce)),
+                }
+            }
+            _ = tokio::time::sleep_until(burst.as_ref().map_or_else(|| Instant::now() + far, |b| b.quiet_at)),
+                if burst.is_some() => {
+                if let Some(b) = burst.take() {
+                    tokio::select! {
+                        _ = pair.on_events(b.changes) => {}
+                        _ = &mut stop => break Ok(()),
+                    }
                 }
             }
             Some(n) = vault_events.recv() => {
@@ -871,72 +885,60 @@ mod tests {
             .collect()
     }
 
-    /// Send each batch `after` its predecessor, from a task of its own.
-    fn feed(tx: mpsc::UnboundedSender<Normalized>, batches: Vec<(Duration, &'static str)>) {
-        tokio::spawn(async move {
-            for (after, path) in batches {
-                tokio::time::sleep(after).await;
-                if tx.send(batch(path)).is_err() {
-                    return;
-                }
-            }
-        });
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn batches_a_tick_or_two_apart_are_one_burst() {
+    async fn a_burst_is_quiet_a_whole_debounce_after_its_last_batch() {
         // What a watcher does to 18 files deleted in a row when a tick lands in
         // the middle: the rest of them arrive in a second batch.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let started = Instant::now();
-        feed(
-            tx.clone(),
-            vec![
-                (Duration::from_millis(500), "second"),
-                (Duration::from_millis(900), "third"),
-            ],
-        );
-        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
-        assert_eq!(paths(&burst), ["first", "second", "third"]);
-        // Held until a whole debounce passed after the last one (the watcher is
-        // still there: `tx` is alive).
+        let t0 = Instant::now();
+        let mut burst = Burst::start(batch("first"), DEBOUNCE);
+        assert_eq!(burst.quiet_at, t0 + burst_gap(DEBOUNCE));
+
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        burst.add(batch("second"), DEBOUNCE);
+        assert_eq!(paths(&burst.changes), ["first", "second"]);
         assert_eq!(
-            started.elapsed(),
-            Duration::from_millis(500 + 900) + DEBOUNCE
+            burst.quiet_at,
+            t0 + Duration::from_millis(1500) + burst_gap(DEBOUNCE),
+            "pushed a whole debounce after the last batch, not the first"
         );
-        drop(tx);
+        assert_eq!(burst.due_at, t0 + burst_cap(DEBOUNCE));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_batch_after_a_quiet_gap_is_the_next_burst() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let started = Instant::now();
-        feed(tx, vec![(Duration::from_millis(2500), "later")]);
-        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
-        assert_eq!(paths(&burst), ["first"]);
-        assert_eq!(started.elapsed(), burst_gap(DEBOUNCE));
-        assert_eq!(paths(&rx.recv().await.unwrap()), ["later"], "kept for next");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_burst_that_never_stops_is_cut_off() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let started = Instant::now();
+    async fn a_burst_that_never_stops_is_cut_off_at_the_cap() {
+        let t0 = Instant::now();
+        let mut burst = Burst::start(batch("first"), DEBOUNCE);
         // A batch every 250 ms, for far longer than the cap.
-        feed(tx, vec![(Duration::from_millis(250), "again"); 100]);
-        let burst = coalesce(batch("first"), &mut rx, DEBOUNCE).await;
-        assert_eq!(started.elapsed(), burst_cap(DEBOUNCE));
-        assert!(burst.changes.len() > 2, "merged what arrived meanwhile");
-        assert!(burst.changes.len() < 100, "but not everything");
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_millis(250)).await;
+            burst.add(batch("again"), DEBOUNCE);
+            assert!(
+                burst.quiet_at <= burst.due_at,
+                "pushed no later than the cap"
+            );
+        }
+        assert_eq!(burst.due_at, t0 + burst_cap(DEBOUNCE));
+        assert_eq!(burst.quiet_at, burst.due_at);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_closed_channel_returns_what_there_is() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        drop(tx);
-        let started = Instant::now();
-        let burst = coalesce(batch("only"), &mut rx, DEBOUNCE).await;
-        assert_eq!(paths(&burst), ["only"]);
-        assert_eq!(started.elapsed(), Duration::ZERO, "no waiting on nobody");
+    async fn a_burst_still_gathering_does_not_block_the_loop() {
+        // The loop arms a timer for `quiet_at` next to its others; it does not
+        // wait in place. That is what keeps a `ctl sync` answerable meanwhile.
+        let mut burst = Burst::start(batch("first"), DEBOUNCE);
+        let waiting = tokio::time::sleep_until(burst.quiet_at);
+        tokio::pin!(waiting);
+        let other = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            "served"
+        };
+        let served = tokio::select! {
+            _ = &mut waiting => "burst",
+            r = other => r,
+        };
+        assert_eq!(served, "served");
+        // And a further batch moves the deadline without anyone waiting on it.
+        burst.add(batch("second"), DEBOUNCE);
+        assert_eq!(paths(&burst.changes), ["first", "second"]);
     }
 }
