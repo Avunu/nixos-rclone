@@ -144,6 +144,12 @@
                     user = "alice";
                     pull.onBoot = "1h";
                     settle.enable = false;
+                    # The markdownSync subtest below drives this pair with explicit
+                    # syncs and checks what *they* do. Left at the default 2 s, the
+                    # vault watcher acts between the steps whenever the builder is
+                    # slow enough for them to take longer than that, and refreshes
+                    # the vault's identity record while a rename is half done.
+                    push.debounce = "30s";
                     markdownSync = {
                       enable = true;
                       path = "/home/alice/vault";
