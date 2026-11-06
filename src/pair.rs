@@ -278,7 +278,11 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
 
     let mut pair = Pair {
         mirror,
-        state: PushState { known, ids },
+        state: PushState {
+            known,
+            ids,
+            ..Default::default()
+        },
         known_file,
         listings: bisync::listing_paths(&cfg),
         retry_at: (!retry.is_empty()).then(|| Instant::now() + RETRY_MIN),

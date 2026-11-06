@@ -221,7 +221,9 @@ only saw half of (`mkdir new && mv old new/`).
 A move made in the vault is carried to the remote *before* the next pull as a
 server-side move; if the remote cannot be reached the pull waits and the rename
 is retried (and survives a restart), rather than being replayed as delete +
-create. `syncDeletions` runs after move tracking, so only genuine deletions
+create. A remote that can be reached but keeps failing the rename, for example
+with a 502, gets 30 minutes; after that the file is uploaded under its new name
+and the old one deleted, which on Google Drive makes it a new document. `syncDeletions` runs after move tracking, so only genuine deletions
 reach it, and an empty or unmounted side is never propagated.
 
 ## Google Drive integration
@@ -337,6 +339,29 @@ once per run and continues, so `compare = "size,modtime,checksum"`
 can stay as it is. Prefer `pathOverride` where it applies: real checksums are
 what let bisync tell a genuine change from a file that merely has the same size
 and a rewritten modtime.
+
+## WebDAV remotes behind a proxy
+
+Renames are pushed as WebDAV `MOVE`, which names its target in a `Destination`
+header. Apache's `mod_dav` (behind Synology's WebDAV Server, among others) rejects
+one whose scheme or port differs from what it was reached on, so through a proxy
+that terminates TLS every rename fails with `502 Bad Gateway`:
+
+```
+Destination URI refers to different scheme or port (https://hostname:443)
+(want: http://hostname:5005)
+```
+
+The daemon retries a rename the server rejects like this, then after 30 minutes
+gives up and uploads the file under its new name and deletes the old one. The
+file arrives, but a rename costs a full upload and a 30-minute wait. Fix it at
+the proxy, by rewriting the header to match the backend. In nginx:
+
+```nginx
+set $destination $http_destination;
+if ($destination ~ ^https://(.*)$) { set $destination http://$1; }
+proxy_set_header Destination $destination;
+```
 
 ## Excluding paths
 
