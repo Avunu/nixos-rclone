@@ -24,7 +24,7 @@ clap = { version = "4", features = ["derive", "env"] }
 filetime = "0.2"
 notify = "8"
 notify-debouncer-full = "0.7"
-rclone-sdk = "=1.75.0"
+rclone-sdk = "=1.75.2"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
 # Must match the reqwest major that rclone-sdk exposes in its public API.
 reqwest = { version = "0.12.28", default-features = false }
