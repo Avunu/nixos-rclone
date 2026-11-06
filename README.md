@@ -37,6 +37,10 @@ that talks to a private `rclone rcd` over rclone's remote-control API:
   withheld from pushing and left to the pull, whose `maxDelete` check judges
   it. A bisync that locks itself out after a critical error is *not* resynced
   automatically; the daemon reports it and waits for you.
+- **Stuck locks.** A lock file that stops pulls is reported as the state `locked`
+  in `ctl status`, and in `systemctl status`, because the service itself stays
+  healthy (and keeps pushing). An empty lock older than `maxLock` is removed
+  automatically: rclone would otherwise honour it forever.
 
 Inspect or nudge a running pair with the `rclone-remotes` command the module
 installs (run as the pair's user, or root):
@@ -414,7 +418,7 @@ stops it syncing but does not remove a copy an earlier run already made.
 | `conflict.loser` | enum | `"delete"` | What happens to the losing copy: `num`, `pathname` or `delete` |
 | `compare` | string | `"size,modtime,checksum"` | How two files are judged equal |
 | `resilient` / `recover` / `createEmptySrcDirs` | bool | `true` | The matching bisync options |
-| `maxLock` | string | `"5m"` | How long a crashed run's lock is honoured |
+| `maxLock` | string | `"5m"` | How long a crashed run's lock is honoured; an empty lock older than this is removed by the daemon, since rclone would honour it forever |
 | `maxDelete` | null or 0–100 | `null` | Abort if more than this percent would be deleted (null = rclone's 50) |
 | `extraParams` | attrs | `{}` | Extra parameters for rclone's `sync/bisync`, merged over the above |
 | `settle.enable` | bool | `true` | Run a second pass after a pull and after pushed changes, to reconcile remotes that rewrite modtimes after upload (see Google Drive above); turn off for SFTP/WebDAV/local |

@@ -1,11 +1,13 @@
 //! Pulling: the real daemon driving a real `rclone rcd` over local directories.
 
 use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use rclone_remotes::ctl::{Request, State};
 
 mod common;
-use common::{Harness, Options, put};
+use common::{Harness, Options, put, read};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn first_sync_resyncs_exactly_once_and_deletions_propagate() {
@@ -132,4 +134,59 @@ async fn critical_lockout_is_reported_and_resync_recovers() {
     assert_eq!(fixed.status.state, State::Idle);
     assert_eq!(fixed.status.resyncs, resyncs + 1);
     h.sync_ok().await;
+}
+
+/// The lock file of this pair's bisync session.
+fn lock_path(h: &Harness) -> PathBuf {
+    let listing = fs::read_dir(&h.workdir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.ends_with(".path1.lst"))
+        .expect("the pair has synced");
+    h.workdir
+        .join(format!("{}.lck", listing.trim_end_matches(".path1.lst")))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_empty_lock_no_longer_stops_pulls() {
+    let h = Harness::start(Options::default()).await;
+    put(&h.local, "a.txt", "a");
+    h.sync_ok().await;
+
+    // rclone would honour this forever, whatever maxLock says.
+    let lock = lock_path(&h);
+    let f = fs::File::create(&lock).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(86_400))
+        .unwrap();
+
+    put(&h.remote, "from-remote.txt", "r");
+    let r = h.ctl(Request::Sync).await;
+    assert!(r.ok, "{:?}", r.message);
+    assert_eq!(r.status.state, State::Idle);
+    assert!(!lock.exists());
+    assert_eq!(read(&h.local, "from-remote.txt").as_deref(), Some("r"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_that_may_be_live_is_honoured_and_reported() {
+    let h = Harness::start(Options::default()).await;
+    put(&h.local, "a.txt", "a");
+    h.sync_ok().await;
+
+    let lock = lock_path(&h);
+    fs::File::create(&lock).unwrap();
+    let r = h.ctl(Request::Sync).await;
+    assert!(!r.ok);
+    assert_eq!(r.status.state, State::Locked);
+    assert!(r.status.failing_since.is_some());
+    let error = r.status.last_error.unwrap();
+    assert!(error.contains(lock.to_str().unwrap()), "{error}");
+    assert!(!error.contains('\u{1b}'), "colour codes: {error:?}");
+    assert!(lock.exists(), "must not be removed");
+
+    // Not sticky: once the lock has gone the next pull just works.
+    fs::remove_file(&lock).unwrap();
+    let r = h.sync_ok().await;
+    assert_eq!(r.status.state, State::Idle);
+    assert_eq!(r.status.failing_since, None);
 }

@@ -310,7 +310,7 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
                     r = pair.pass(false) => r,
                     _ = &mut stop => break Ok(()),
                 };
-                if let Err(e) = r {
+                if let Err(e) = r && pair.status.state != State::Locked {
                     tracing::warn!(pair = %pair.cfg.name, error = %e, "scheduled pull failed");
                 }
                 next = Instant::now() + pair.cfg.pull_interval() + jitter(pair.cfg.pull_jitter());
@@ -350,7 +350,7 @@ pub async fn run(cfg: PairConfig, rt: Runtime) -> Result<()> {
                     r = pair.pass(false) => r,
                     _ = &mut stop => break Ok(()),
                 };
-                if let Err(e) = r {
+                if let Err(e) = r && pair.status.state != State::Locked {
                     tracing::warn!(pair = %pair.cfg.name, error = %e, "follow-up pull failed");
                 }
             }
@@ -663,6 +663,10 @@ impl Pair {
         };
         match result {
             Ok(()) => {
+                if self.status.failing_since.take().is_some() {
+                    tracing::info!(pair = %self.cfg.name, "pulls are working again");
+                    let _ = sd_notify::notify(&[NotifyState::Status("")]);
+                }
                 self.status.state = State::Idle;
                 self.status.last_error = None;
                 self.status.last_success = now_secs();
@@ -672,10 +676,46 @@ impl Pair {
         }
     }
 
+    /// Record a failed pass. `systemctl status` shows it too, because the
+    /// service itself stays healthy while its pulls are failing. A lock is
+    /// logged as an error once, not as a warning on every retry.
     fn failed(&mut self, state: State, msg: String) -> Result<(), String> {
+        let changed = self.status.last_error.as_ref() != Some(&msg);
+        if changed {
+            let _ = sd_notify::notify(&[NotifyState::Status(&format!("pulls failing: {msg}"))]);
+            if state == State::Locked {
+                tracing::error!(pair = %self.cfg.name, error = %msg, "pulls are stopped by a lock file");
+            }
+        }
         self.status.state = state;
         self.status.last_error = Some(msg.clone());
+        self.status.failing_since = self.status.failing_since.or_else(now_secs);
         Err(msg)
+    }
+
+    /// Run bisync, first clearing a lock that no run can still own.
+    async fn bisync(&self, mode: Mode) -> Result<bisync::Report, bisync::Failure> {
+        match bisync::run(&self.rc, &self.cfg, mode).await {
+            Err(bisync::Failure {
+                kind: FailureKind::Locked(lock),
+                ..
+            }) if bisync::remove_abandoned_lock(&lock, &self.cfg) => {
+                tracing::warn!(pair = %self.cfg.name, lock = %lock.display(), "removed an empty lock file abandoned by an interrupted run");
+                bisync::run(&self.rc, &self.cfg, mode).await
+            }
+            result => result,
+        }
+    }
+
+    /// The message for a pass that a lock file stopped.
+    fn locked(lock: &std::path::Path) -> (State, String) {
+        (
+            State::Locked,
+            format!(
+                "stopped by lock file {}; if no bisync is running, delete it",
+                lock.display()
+            ),
+        )
     }
 
     /// A pass succeeded: note where it says the listings are, and everything
@@ -714,7 +754,7 @@ impl Pair {
 
     async fn normal(&mut self) -> Result<(), (State, String)> {
         self.mirror_before_pull().await?;
-        let result = match bisync::run(&self.rc, &self.cfg, Mode::Normal).await {
+        let result = match self.bisync(Mode::Normal).await {
             Ok(report) => {
                 self.remember(&report);
                 self.refresh_ids().await;
@@ -725,6 +765,7 @@ impl Pair {
                 Ok(())
             }
             Err(f) => match f.kind {
+                FailureKind::Locked(ref lock) => Err(Self::locked(lock)),
                 FailureKind::NoPriorListings => self.resync("no prior listings").await,
                 FailureKind::CriticalLockout => Err((
                     State::NeedsResync,
@@ -801,7 +842,7 @@ impl Pair {
 
     async fn resync(&mut self, why: &str) -> Result<(), (State, String)> {
         tracing::info!(pair = %self.cfg.name, why, "initial resync");
-        match bisync::run(&self.rc, &self.cfg, Mode::Resync).await {
+        match self.bisync(Mode::Resync).await {
             Ok(report) => {
                 self.remember(&report);
                 self.refresh_ids().await;
@@ -809,6 +850,10 @@ impl Pair {
                 self.status.resyncs += 1;
                 Ok(())
             }
+            Err(bisync::Failure {
+                kind: FailureKind::Locked(lock),
+                ..
+            }) => Err(Self::locked(&lock)),
             Err(f) => Err((State::Failed, format!("resync failed: {f}"))),
         }
     }
@@ -819,7 +864,7 @@ impl Pair {
     /// Non-fatal: it is an optimisation, and the first pass already succeeded.
     async fn settle(&mut self) {
         tokio::time::sleep(Duration::from_secs(self.cfg.settle.delay)).await;
-        match bisync::run(&self.rc, &self.cfg, Mode::Normal).await {
+        match self.bisync(Mode::Normal).await {
             Ok(report) => {
                 self.remember(&report);
                 self.refresh_ids().await;
