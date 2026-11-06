@@ -126,9 +126,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carta"
-version = "0.0.11"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30f58d1f7aa099a816f2893698911a22acb46f4e626bb3a4d077ecf5bcdd445b"
+checksum = "af498875fbd82631bdb2d0d428dd0295ea14eb997a5be33e470a0ce6d5a56f4f"
 dependencies = [
  "carta-ast",
  "carta-core",
@@ -139,30 +139,32 @@ dependencies = [
 
 [[package]]
 name = "carta-ast"
-version = "0.0.11"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77f4c0ec4bbf291e5fc1027301f305246114f025e2b1cca0786c1364039c3bbd"
+checksum = "7c4eef5d8289219db569d7714b6816a989a7c6e04cf7d73f3eec1dd80b83693c"
 dependencies = [
  "compact_str",
+ "stacker",
  "unicode-general-category",
 ]
 
 [[package]]
 name = "carta-core"
-version = "0.0.11"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f7dae1365590d4845a713f73a2159e573a56f26f58e6d47e3478f8d8e0e344d"
+checksum = "55281028ff00f0d9dd0cfd805127352e1797d857f5fdec9b4ce95ba627752b61"
 dependencies = [
  "carta-ast",
  "miniz_oxide",
+ "stacker",
  "thiserror",
 ]
 
 [[package]]
 name = "carta-readers"
-version = "0.0.11"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "800fe815cdbea7e198e5d9ecc31102e874d0fc683bf1a7308c916aa52d5be099"
+checksum = "b58f57f23ba2903a1877998af2995a9150347574caf8d9e5352d65b71f92b64d"
 dependencies = [
  "carta-ast",
  "carta-core",
@@ -174,9 +176,9 @@ dependencies = [
 
 [[package]]
 name = "carta-writers"
-version = "0.0.11"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d84525cc0dd43b1ad4a5e61aa7fbd38e83f73e31b4d568d383d42746ed0b364"
+checksum = "75b36c8c57a426d3dd5c3de1d7d862774cbf3b35b0b238019bec57bf400671bd"
 dependencies = [
  "carta-ast",
  "carta-core",
