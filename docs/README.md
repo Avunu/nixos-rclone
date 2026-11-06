@@ -380,7 +380,7 @@ stops it syncing but does not remove a copy an earlier run already made.
 | `remote` | string | — | Rclone remote path (e.g. `myremote:path`) |
 | `localPath` | string | — | Local mount point |
 | `configFile` | string or null | global default | Rclone config file path (`null` = rclone's default) |
-| `uid` | int | global default | UID for the FUSE mount |
+| `uid` | int | global default | UID reported as the owner of every file. Must match `user` (other than root), or the trash and git fail; checked at evaluation when `users.users.<user>.uid` is set |
 | `gid` | int | global default | GID for the FUSE mount |
 | `user` | string | global default | Owner for tmpfiles rule |
 | `group` | string | global default | Group for tmpfiles rule |
