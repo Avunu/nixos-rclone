@@ -21,6 +21,6 @@ jobs:
   docs:
     permissions:
       contents: read # checkout
-    uses: Avunu/site-docs/.github/workflows/check-docs.yml@3f342fe388ecb93a860adfc3ad97a06cced0bf9e # 2026-10-16
+    uses: Avunu/site-docs/.github/workflows/check-docs.yml@39f41096a8a89293da5fb85a93f8c1551bce32f4 # 2026-10-16
     with:
       path: nixos-rclone

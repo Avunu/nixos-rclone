@@ -187,7 +187,12 @@ let
       uid = mkOption {
         type = types.int;
         default = cfg.defaultUid;
-        description = "UID for the FUSE mount.";
+        description = ''
+          UID the mount reports as the owner of every file. Must match `user`
+          (other than root): programs that check ownership, such as GLib's trash
+          and git, fail otherwise. Checked at evaluation when
+          `users.users.<user>.uid` is set.
+        '';
       };
       gid = mkOption {
         type = types.int;
@@ -595,6 +600,29 @@ let
 
   mkExcludeMountOpts = m: map (pat: "exclude=${pat}") m.excludes;
 
+  # rclone reports every file on a mount as owned by `uid`, and without
+  # default_permissions nothing enforces that, so a wrong uid leaves plain reads
+  # and writes working. Only programs that check ownership themselves break:
+  # GLib refuses a trash directory its user does not own (which also fails
+  # image viewers that trash the original to overwrite it), and git reports
+  # dubious ownership.
+  #
+  # Root is exempt: it is the default `user`, alongside a default uid of 1000.
+  # A uid NixOS allocates is null here and cannot be checked at evaluation.
+  mkMountUidAssertion =
+    name: m:
+    let
+      userUid = config.users.users.${m.user}.uid or null;
+    in
+    {
+      assertion = m.user == "root" || userUid == null || userUid == m.uid;
+      message = ''
+        services.rclone-remotes.mounts.${name}.uid is ${toString m.uid}, but its user "${m.user}" has uid ${toString userUid}.
+        The mount would report ${m.user}'s files as owned by another user, which breaks moving them to the trash and using git on them.
+        Set mounts.${name}.uid or defaultUid to ${toString userUid}.
+      '';
+    };
+
   mkGDriveMountOpts =
     m:
     optionals m.googleDrive.enable (
@@ -935,7 +963,8 @@ in
           assertion = s.markdownSync.enable -> s.markdownSync.path != null;
           message = "services.rclone-remotes.bisyncs.${name}.markdownSync.path must be set when markdownSync is enabled";
         }) cfg.bisyncs
-        ++ concatMap (s: s.assertions) (attrValues cfg.bisyncs);
+        ++ concatMap (s: s.assertions) (attrValues cfg.bisyncs)
+        ++ mapAttrsToList mkMountUidAssertion cfg.mounts;
 
       warnings = concatMap (s: s.warnings) (attrValues cfg.bisyncs);
 

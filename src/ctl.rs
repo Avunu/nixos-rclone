@@ -34,6 +34,9 @@ pub enum State {
     /// rclone locked the pair out after a critical error. Not retried until
     /// `ctl resync`: resyncing automatically could hide what went wrong.
     NeedsResync,
+    /// A lock file stops every pass (pushes still go through). Retried on
+    /// schedule, so this clears by itself once the lock goes away.
+    Locked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,8 @@ pub struct Status {
     /// Unix seconds.
     pub last_success: Option<u64>,
     pub last_error: Option<String>,
+    /// Unix seconds of the first failure since the last success.
+    pub failing_since: Option<u64>,
     /// Completed bisync passes (a settle pass counts).
     pub passes: u64,
     /// How often this process started from scratch with `--resync`.
@@ -66,6 +71,7 @@ impl Status {
             state: State::Starting,
             last_success: None,
             last_error: None,
+            failing_since: None,
             passes: 0,
             resyncs: 0,
             pushed: Pushed::default(),

@@ -72,6 +72,94 @@
           pre-commit.settings.hooks.nixfmt.enable = true;
           pre-commit.settings.hooks.rustfmt.enable = true;
 
+          # Evaluation only: a mount's uid must agree with its user's.
+          checks.module-mount-uid =
+            let
+              # The messages of this module's failed assertions. Only its own
+              # are read: other modules' messages may throw unless they failed.
+              failures =
+                { users, mount }:
+                let
+                  evaluated = inputs.nixpkgs.lib.nixosSystem {
+                    inherit system;
+                    modules = [
+                      ./module.nix
+                      {
+                        users.users = users;
+                        services.rclone-remotes = {
+                          enable = true;
+                          mounts.test = {
+                            remote = "remote:path";
+                            localPath = "/mnt/test";
+                          }
+                          // mount;
+                        };
+                      }
+                    ];
+                  };
+                in
+                map (a: a.message) (
+                  builtins.filter (a: !a.assertion) (
+                    builtins.concatMap (d: d.value) (
+                      builtins.filter (
+                        d: d.file == toString ./module.nix
+                      ) evaluated.options.assertions.definitionsWithLocations
+                    )
+                  )
+                );
+              pinned = uid: {
+                alice = {
+                  isNormalUser = true;
+                  inherit uid;
+                };
+              };
+              unpinned.alice.isNormalUser = true;
+              results = pkgs.lib.runTests {
+                testMismatchFails = {
+                  expr = builtins.length (failures {
+                    users = pinned 1001;
+                    mount.user = "alice";
+                  });
+                  expected = 1;
+                };
+                testMatchPasses = {
+                  expr = failures {
+                    users = pinned 1000;
+                    mount.user = "alice";
+                  };
+                  expected = [ ];
+                };
+                testMountUidOverridePasses = {
+                  expr = failures {
+                    users = pinned 1001;
+                    mount = {
+                      user = "alice";
+                      uid = 1001;
+                    };
+                  };
+                  expected = [ ];
+                };
+                testDefaultRootPasses = {
+                  expr = failures {
+                    users = { };
+                    mount = { };
+                  };
+                  expected = [ ];
+                };
+                testAllocatedUidCannotBeChecked = {
+                  expr = failures {
+                    users = unpinned;
+                    mount.user = "alice";
+                  };
+                  expected = [ ];
+                };
+              };
+            in
+            if results == [ ] then
+              pkgs.emptyFile
+            else
+              throw "module-mount-uid failed: ${builtins.toJSON results}";
+
           # End-to-end VM test: automount + credential staging + bisync
           # init-once semantics and deletion propagation.
           checks.module-test = pkgs.testers.runNixOSTest {
