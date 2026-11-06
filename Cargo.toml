@@ -27,7 +27,7 @@ notify-debouncer-full = "0.7"
 rclone-sdk = "=1.75.0"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
 # Must match the reqwest major that rclone-sdk exposes in its public API.
-reqwest = { version = "0.12.28", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
 rustix = { version = "1", features = ["fs", "mount", "process"] }
 sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
