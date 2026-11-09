@@ -102,10 +102,11 @@ fn md2docx(doc: &mut Document) {
             for item in items {
                 // Only an item that is a single tight run: anything richer is
                 // already made of paragraphs.
+                // `Block` implements `Drop`, so take the inlines out in place.
                 if let [only @ Block::Plain(_)] = item.as_mut_slice()
-                    && let Block::Plain(inlines) = std::mem::replace(only, Block::HorizontalRule)
+                    && let Block::Plain(inlines) = only
                 {
-                    *only = Block::Para(inlines);
+                    *only = Block::Para(std::mem::take(inlines));
                 }
             }
         }
@@ -121,10 +122,11 @@ fn docx2md(doc: &mut Document) {
         Block::Header(_, attr, _) => attr.id.clear(),
         Block::BulletList(items) | Block::OrderedList(_, items) => {
             for item in items {
+                // `Block` implements `Drop`, so take the inlines out in place.
                 if let [only @ Block::Para(_)] = item.as_mut_slice()
-                    && let Block::Para(inlines) = std::mem::replace(only, Block::HorizontalRule)
+                    && let Block::Para(inlines) = only
                 {
-                    *only = Block::Plain(inlines);
+                    *only = Block::Plain(std::mem::take(inlines));
                 }
             }
         }
