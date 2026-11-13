@@ -100,18 +100,24 @@ fn md2docx(doc: &mut Document) {
         Block::Header(_, attr, _) => attr.id.clear(),
         Block::BulletList(items) | Block::OrderedList(_, items) => {
             for item in items {
-                // Only an item that is a single tight run: anything richer is
-                // already made of paragraphs.
-                // `Block` implements `Drop`, so take the inlines out in place.
-                if let [only @ Block::Plain(_)] = item.as_mut_slice()
-                    && let Block::Plain(inlines) = only
-                {
-                    *only = Block::Para(std::mem::take(inlines));
+                if let Some(Block::Plain(inlines)) = tight_head(item) {
+                    let inlines = std::mem::take(inlines);
+                    item[0] = Block::Para(inlines);
                 }
             }
         }
         _ => {}
     });
+}
+
+/// The leading block of a list item that is tight: its text, optionally
+/// followed by nothing but nested lists. An item with several paragraphs, a
+/// code block and so on is genuinely loose and is left alone.
+fn tight_head(item: &mut [Block]) -> Option<&mut Block> {
+    let (head, rest) = item.split_first_mut()?;
+    rest.iter()
+        .all(|b| matches!(b, Block::BulletList(_) | Block::OrderedList(..)))
+        .then_some(head)
 }
 
 /// The docx → markdown filter.
@@ -122,11 +128,9 @@ fn docx2md(doc: &mut Document) {
         Block::Header(_, attr, _) => attr.id.clear(),
         Block::BulletList(items) | Block::OrderedList(_, items) => {
             for item in items {
-                // `Block` implements `Drop`, so take the inlines out in place.
-                if let [only @ Block::Para(_)] = item.as_mut_slice()
-                    && let Block::Para(inlines) = only
-                {
-                    *only = Block::Plain(std::mem::take(inlines));
+                if let Some(Block::Para(inlines)) = tight_head(item) {
+                    let inlines = std::mem::take(inlines);
+                    item[0] = Block::Plain(inlines);
                 }
             }
         }
@@ -172,6 +176,21 @@ mod tests {
             back.contains("1.  first\n2.  second\n") || back.contains("1. first\n2. second\n"),
             "{back:?}"
         );
+    }
+
+    #[test]
+    fn google_docs_nested_lists_come_back_tight() {
+        // Google Docs exports a nested bullet as its own list under the parent
+        // item, so the item is `[Para, BulletList]`: the markdown writer
+        // treats the whole list as loose unless the paragraph is made `Plain`.
+        // A round trip through our own docx writer does not produce this shape.
+        let docx = include_bytes!("../../fixtures/nested-list.docx");
+        let back = docx_to_md(docx).unwrap();
+        assert!(
+            !back.contains("\n\n"),
+            "blank line in a tight list: {back:?}"
+        );
+        assert!(back.starts_with("- Parent one\n  - child a\n"), "{back:?}");
     }
 
     #[test]
