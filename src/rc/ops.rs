@@ -103,14 +103,14 @@ fn from_sdk(e: Error<types::RcError>) -> OpError {
 
 impl Remote for RcRemote {
     async fn copy_file(&self, rel: &str) -> Result<(), OpError> {
-        let body: types::OperationsCopyfileRequest = serde_json::from_value(json!({
+        let body: types::OperationsCopyfileBody = serde_json::from_value(json!({
             "srcFs": self.local, "srcRemote": rel,
             "dstFs": self.remote, "dstRemote": rel,
         }))
         .map_err(|e| classify(e.to_string()))?;
         self.rc
             .client
-            .operations_copyfile(None, None, None, None, None, None, None, &body)
+            .operations_copyfile(&body)
             .await
             .map(|_| ())
             .map_err(from_sdk)
@@ -118,38 +118,38 @@ impl Remote for RcRemote {
 
     async fn move_file(&self, from: &str, to: &str) -> Result<(), OpError> {
         // Within the remote: a server-side move where the backend has one.
-        let body: types::OperationsMovefileRequest = serde_json::from_value(json!({
+        let body: types::OperationsMovefileBody = serde_json::from_value(json!({
             "srcFs": self.remote, "srcRemote": from,
             "dstFs": self.remote, "dstRemote": to,
         }))
         .map_err(|e| classify(e.to_string()))?;
         self.rc
             .client
-            .operations_movefile(None, None, None, None, None, None, None, &body)
+            .operations_movefile(&body)
             .await
             .map(|_| ())
             .map_err(from_sdk)
     }
 
     async fn delete_file(&self, rel: &str) -> Result<(), OpError> {
-        let body: types::OperationsDeletefileRequest =
+        let body: types::OperationsDeletefileBody =
             serde_json::from_value(json!({ "fs": self.remote, "remote": rel }))
                 .map_err(|e| classify(e.to_string()))?;
         self.rc
             .client
-            .operations_deletefile(None, None, None, None, None, &body)
+            .operations_deletefile(&body)
             .await
             .map(|_| ())
             .map_err(from_sdk)
     }
 
     async fn remove_dir(&self, rel: &str) -> Result<(), OpError> {
-        let body: types::OperationsRmdirRequest =
+        let body: types::OperationsRmdirBody =
             serde_json::from_value(json!({ "fs": self.remote, "remote": rel }))
                 .map_err(|e| classify(e.to_string()))?;
         self.rc
             .client
-            .operations_rmdir(None, None, None, None, None, &body)
+            .operations_rmdir(&body)
             .await
             .map(|_| ())
             .map_err(from_sdk)
