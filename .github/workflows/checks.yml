@@ -59,15 +59,15 @@ jobs:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
       # `determinate: false`: nothing here needs Determinate-only nixConfig, and
       # the default has the installer try to log into FlakeHub on a repo that
       # isn't registered there.
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/nix-installer-action@v23
         if: runner.environment == 'github-hosted'
         with:
           determinate: false
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
         if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
@@ -91,7 +91,7 @@ jobs:
     name: vm
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","nixos"]') }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
 
       # NixOS VM tests need /dev/kvm, which is present on Linux runners but not
       # world-accessible by default.
@@ -103,11 +103,11 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/nix-installer-action@v23
         if: runner.environment == 'github-hosted'
         with:
           determinate: false
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
         if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
@@ -132,9 +132,9 @@ jobs:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
 
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/nix-installer-action@v23
         if: runner.environment == 'github-hosted'
         with:
           determinate: false
@@ -146,7 +146,7 @@ jobs:
             # it must never trust a remembered "that path is missing".
             narinfo-cache-negative-ttl = 0
 
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
         if: runner.environment == 'github-hosted'
         with:
           use-flakehub: false
@@ -164,7 +164,7 @@ jobs:
       # registers a post-build hook, which magic-nix-cache above already owns,
       # and would push every path built during the job. The explicit push below
       # sends the runtime closure instead.
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_CACHE }}
           skipPush: true
