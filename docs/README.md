@@ -1,3 +1,12 @@
+---
+title: nixos-rclone
+description: "A NixOS module and Rust daemon for declarative rclone FUSE automounts and event-driven two-way sync."
+nav_title: Overview
+order: 0
+tags: [overview, rclone]
+updated: 2026-11-24
+---
+
 # nixos-rclone
 
 A NixOS module, backed by a small Rust daemon (`rclone-remotes`), providing:
@@ -10,6 +19,9 @@ A NixOS module, backed by a small Rust daemon (`rclone-remotes`), providing:
   vault as Google Docs, with moves and renames followed as renames
 - **Suspend/resume recovery** that resets failed mounts after waking from sleep
 - **Automatic directory creation** via systemd tmpfiles
+
+> [!TIP]
+> A task-by-task walkthrough of mounts, two-way sync and the Obsidian to Google Docs setup is available. See [Mount and sync cloud storage](mounts-and-sync.md).
 
 ## How it works
 
