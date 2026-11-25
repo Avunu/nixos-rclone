@@ -31,6 +31,14 @@ pub struct Normalized {
     pub rescan: bool,
 }
 
+impl Normalized {
+    /// Fold a later batch into this one, keeping the order things happened in.
+    pub fn merge(&mut self, later: Normalized) {
+        self.changes.extend(later.changes);
+        self.rescan |= later.rescan;
+    }
+}
+
 /// Whether the daemon pushes a file of this name itself.
 ///
 /// rclone does not use a file's on-disk name internally: it presents control
@@ -280,5 +288,36 @@ mod tests {
         let overflow = Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
         let n = run(&[DebouncedEvent::new(overflow, Instant::now())]);
         assert!(n.rescan);
+    }
+
+    #[test]
+    fn merging_batches_keeps_their_order_and_any_rescan() {
+        let mut first = Normalized {
+            changes: vec![Change::Dirty("a".into())],
+            rescan: false,
+        };
+        first.merge(Normalized {
+            changes: vec![Change::Rename {
+                from: "a".into(),
+                to: "b".into(),
+            }],
+            rescan: true,
+        });
+        first.merge(Normalized {
+            changes: vec![Change::Dirty("c".into())],
+            rescan: false,
+        });
+        assert_eq!(
+            first.changes,
+            vec![
+                Change::Dirty("a".into()),
+                Change::Rename {
+                    from: "a".into(),
+                    to: "b".into()
+                },
+                Change::Dirty("c".into()),
+            ]
+        );
+        assert!(first.rescan, "a lost-events flag must survive the merge");
     }
 }

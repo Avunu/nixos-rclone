@@ -1,6 +1,7 @@
 //! Running `sync/bisync` through the rc API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -88,6 +89,9 @@ pub enum FailureKind {
     /// rclone renamed the listings to `.lst-err` after a critical error, which
     /// locks out further runs until a resync. Never retried automatically.
     CriticalLockout,
+    /// A lock file stopped the pass before it began: another run holds it, or
+    /// an interrupted one left it behind.
+    Locked(PathBuf),
     Other,
 }
 
@@ -102,11 +106,14 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // rclone's own text spans several lines of colourised tips; the first
         // line is the cause.
-        write!(f, "{}", self.message.lines().next().unwrap_or(""))
+        write!(f, "{}", self.message.lines().next().unwrap_or("").trim())
     }
 }
 
 const NO_PRIOR: &str = "cannot find prior Path1 or Path2 listings";
+const PRIOR_LOCK: &str = "prior lock file found: ";
+/// rclone raises any shorter `--max-lock` to this.
+const MIN_MAX_LOCK: Duration = Duration::from_secs(120);
 
 pub fn classify(outcome: &JobOutcome, report: &Report) -> Option<Failure> {
     if outcome.success {
@@ -115,7 +122,10 @@ pub fn classify(outcome: &JobOutcome, report: &Report) -> Option<Failure> {
     // On failure the job's own `error` is just "bisync aborted"; the cause is
     // in the captured log.
     let log = strip_ansi(&report.output);
-    let kind = if outcome.error.contains(NO_PRIOR) || log.contains(NO_PRIOR) {
+    let error = strip_ansi(&outcome.error);
+    let kind = if let Some(lock) = held_lock(&error).or_else(|| held_lock(&log)) {
+        FailureKind::Locked(lock)
+    } else if error.contains(NO_PRIOR) || log.contains(NO_PRIOR) {
         if report
             .listing1
             .iter()
@@ -131,9 +141,52 @@ pub fn classify(outcome: &JobOutcome, report: &Report) -> Option<Failure> {
     };
     Some(Failure {
         kind,
-        message: cause(&outcome.error, &log),
+        message: cause(&error, &log),
         report: report.clone(),
     })
+}
+
+/// The lock file named by rclone's "prior lock file found" error.
+fn held_lock(text: &str) -> Option<PathBuf> {
+    let after = text.split_once(PRIOR_LOCK)?.1;
+    let end = after.find(".lck")? + ".lck".len();
+    Some(PathBuf::from(&after[..end]))
+}
+
+/// Remove `lock` if no bisync run can still own it, reporting whether it did.
+///
+/// rclone reads an empty lock file as one that never expires, whatever
+/// `--max-lock` says, so without this an interrupted run that left one behind
+/// (or a copy that lost its contents) stops every later pull for good. It is
+/// abandoned once it is older than `maxLock`: a live run rewrites its lock with
+/// content before then. Listings are left alone, so the next pass reconciles
+/// from the last good state. With `maxLock` at 0 the user asked for locks to be
+/// honoured forever, so they are.
+pub fn remove_abandoned_lock(lock: &Path, cfg: &PairConfig) -> bool {
+    let params = params(cfg, Mode::Normal);
+    let Some(max_lock) = params["maxLock"]
+        .as_str()
+        .and_then(|s| crate::timespan::parse(s).ok())
+        .filter(|d| !d.is_zero())
+    else {
+        return false;
+    };
+    let abandoned = std::fs::metadata(lock).is_ok_and(|m| {
+        m.len() == 0
+            && m.modified()
+                .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+                .is_ok_and(|age| age >= max_lock.max(MIN_MAX_LOCK))
+    });
+    if !abandoned {
+        return false;
+    }
+    match std::fs::remove_file(lock) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(lock = %lock.display(), error = %e, "could not remove an abandoned lock file");
+            false
+        }
+    }
 }
 
 /// The most informative one-liner from a failed run's log: rclone's own
@@ -150,7 +203,7 @@ fn cause(error: &str, log: &str) -> String {
             .map_or(l, |(_, m)| m)
             .trim()
             .to_string(),
-        None => error.to_string(),
+        None => error.trim().to_string(),
     }
 }
 
@@ -381,6 +434,76 @@ mod tests {
         std::fs::write(format!("{}.path1.lst", other.display()), "").unwrap();
         std::fs::write(format!("{}.path2.lst", other.display()), "").unwrap();
         assert_eq!(listing_paths(&cfg), None);
+    }
+
+    /// `lock`, emptied or filled, last written `age` ago.
+    fn lock_file(dir: &Path, body: &str, age: Duration) -> PathBuf {
+        let lock = dir.join("session.lck");
+        std::fs::write(&lock, body).unwrap();
+        let then = std::time::SystemTime::now() - age;
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+        lock
+    }
+
+    #[test]
+    fn only_an_old_empty_lock_is_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = pair("\"extraParams\": {}"); // maxLock 5m
+        let old = Duration::from_secs(3600);
+
+        let lock = lock_file(dir.path(), "", old);
+        assert!(remove_abandoned_lock(&lock, &cfg));
+        assert!(!lock.exists());
+
+        // Too recent: it may be a live run between truncating and writing it.
+        let lock = lock_file(dir.path(), "", Duration::from_secs(60));
+        assert!(!remove_abandoned_lock(&lock, &cfg));
+        assert!(lock.exists());
+
+        // Has content: rclone reads its expiry itself.
+        let lock = lock_file(dir.path(), "{\"PID\":\"1\"}", old);
+        assert!(!remove_abandoned_lock(&lock, &cfg));
+        assert!(lock.exists());
+
+        // Already gone.
+        std::fs::remove_file(&lock).unwrap();
+        assert!(!remove_abandoned_lock(&lock, &cfg));
+    }
+
+    #[test]
+    fn locks_are_kept_when_max_lock_gives_no_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Duration::from_secs(3600);
+        for max_lock in ["0", "off"] {
+            let cfg = pair(&format!("\"extraParams\": {{\"maxLock\": \"{max_lock}\"}}"));
+            let lock = lock_file(dir.path(), "", old);
+            assert!(!remove_abandoned_lock(&lock, &cfg), "maxLock {max_lock}");
+            assert!(lock.exists());
+        }
+    }
+
+    #[test]
+    fn recognises_a_held_lock() {
+        // The real shape, colourised, with a space in the path.
+        let failed = JobOutcome {
+            success: false,
+            error: "\u{1b}[31mprior lock file found: \u{1b}[93m/w/home_a_b c..r_s.lck\u{1b}[0m \n\u{1b}[35mTip: another run\u{1b}[0m".into(),
+            output: Value::Null,
+        };
+        let f = classify(&failed, &Report::default()).unwrap();
+        assert_eq!(
+            f.kind,
+            FailureKind::Locked(PathBuf::from("/w/home_a_b c..r_s.lck"))
+        );
+        assert_eq!(
+            f.to_string(),
+            "prior lock file found: /w/home_a_b c..r_s.lck"
+        );
     }
 
     #[test]

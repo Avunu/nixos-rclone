@@ -23,9 +23,10 @@
 //! Until that pull, the set of paths pushed since the last one stands in for
 //! the listing (see [`Pusher::push`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -34,6 +35,8 @@ use crate::identity::{self, Snapshot};
 use crate::listing::Listing;
 use crate::watch::Change;
 
+/// How long a rename the server keeps failing is retried before giving up on it.
+const RENAME_GIVE_UP: Duration = Duration::from_secs(30 * 60);
 /// Fewer deletions than this in one batch are never "a storm".
 const MIN_STORM: usize = 10;
 
@@ -44,6 +47,9 @@ pub struct OpError {
     pub not_found: bool,
     /// Worth retrying later: the network or rcd, not the request.
     pub transient: bool,
+    /// The server itself answered with the failure, so it can be reached. A
+    /// server that keeps answering this way may never accept the request.
+    pub server_answered: bool,
     pub message: String,
 }
 
@@ -111,6 +117,12 @@ pub struct State {
     pub known: BTreeSet<String>,
     /// Identity of local files, to recognise a rename the watcher missed.
     pub ids: Snapshot,
+    /// When to give up on each rename the server keeps failing. Not kept across
+    /// restarts: a restart only gives the rename another full window.
+    pub rename_failing: BTreeMap<(String, String), Instant>,
+    /// Renames no longer attempted, so that recognising one by identity does
+    /// not turn its upload and delete back into the move that failed.
+    pub renames_given_up: BTreeSet<(String, String)>,
 }
 
 /// What is at a path on disk, not following symlinks (rclone does not either).
@@ -398,6 +410,10 @@ impl<R: Remote> Pusher<R> {
             dirty.insert(to.to_string());
             false
         };
+        let key = (from.to_string(), to.to_string());
+        if st.renames_given_up.contains(&key) {
+            return fallback(dirty);
+        }
         // Never synced: nothing there to move. Something already at the
         // destination: not the simple relocation it looks like, and a move
         // would overwrite it.
@@ -410,6 +426,7 @@ impl<R: Remote> Pusher<R> {
 
         match self.remote.move_file(from, to).await {
             Ok(()) => {
+                st.rename_failing.remove(&key);
                 rep.moved += 1;
                 rep.prune_parents_of(from);
                 l1.rename(from, to);
@@ -424,6 +441,7 @@ impl<R: Remote> Pusher<R> {
                 true
             }
             Err(e) if e.not_found => {
+                st.rename_failing.remove(&key);
                 // Already gone from the remote: forget it, and upload fresh.
                 l1.remove(from);
                 l2.remove(from);
@@ -431,6 +449,26 @@ impl<R: Remote> Pusher<R> {
                 dirty.insert(to.to_string());
                 false
             }
+            Err(e) if e.transient && e.server_answered => {
+                let deadline = *st
+                    .rename_failing
+                    .entry(key.clone())
+                    .or_insert_with(|| Instant::now() + RENAME_GIVE_UP);
+                if Instant::now() < deadline {
+                    rep.retry.push(Change::Rename {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    });
+                    return false;
+                }
+                tracing::warn!(from, to, error = %e, "the server keeps failing this rename; giving up and falling back to upload + delete");
+                st.rename_failing.remove(&key);
+                st.renames_given_up.insert(key);
+                fallback(dirty)
+            }
+            // The server could not be reached, which says nothing about the
+            // rename: wait however long it takes, as an upload and a delete
+            // would lose what following the rename preserves.
             Err(e) if e.transient => {
                 rep.retry.push(Change::Rename {
                     from: from.to_string(),
@@ -634,13 +672,23 @@ mod tests {
         OpError {
             not_found: false,
             transient: true,
+            server_answered: false,
             message: "connection refused".into(),
+        }
+    }
+    fn bad_gateway() -> OpError {
+        OpError {
+            not_found: false,
+            transient: true,
+            server_answered: true,
+            message: "copy call failed: 502 Bad Gateway".into(),
         }
     }
     fn missing() -> OpError {
         OpError {
             not_found: true,
             transient: false,
+            server_answered: true,
             message: "object not found".into(),
         }
     }
@@ -648,6 +696,7 @@ mod tests {
         OpError {
             not_found: false,
             transient: false,
+            server_answered: true,
             message: "permission denied".into(),
         }
     }
@@ -1051,6 +1100,94 @@ mod tests {
         let r = f.push(vec![dirty("a"), dirty("b"), dirty("c")]).await;
         assert_eq!(r.deleted, 3);
         assert_eq!(r.storm, None);
+    }
+
+    /// A synced `a.txt` renamed on disk to `b.txt`, with its identity known, so
+    /// that a fallback could pair the two straight back into a move.
+    fn renamed_on_disk() -> Fixture {
+        let f = Fixture::new();
+        f.synced(&["a.txt"]);
+        f.file("a.txt");
+        f.scan_identities();
+        fs::rename(f.root().join("a.txt"), f.root().join("b.txt")).unwrap();
+        f
+    }
+
+    fn past_the_deadline(f: &Fixture) {
+        f.state
+            .lock()
+            .unwrap()
+            .rename_failing
+            .insert(("a.txt".into(), "b.txt".into()), Instant::now());
+    }
+
+    #[tokio::test]
+    async fn a_rename_the_server_rejects_is_retried_at_first() {
+        let f = renamed_on_disk();
+        f.mock.fail_with("move a.txt -> b.txt", bad_gateway());
+        let r = f.push(vec![rename("a.txt", "b.txt")]).await;
+        assert_eq!(r.retry, [rename("a.txt", "b.txt")]);
+        assert_eq!(f.mock.calls(), ["move a.txt -> b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_rename_the_server_keeps_rejecting_becomes_upload_and_delete() {
+        let f = renamed_on_disk();
+        f.mock.fail_with("move a.txt -> b.txt", bad_gateway());
+        past_the_deadline(&f);
+        let r = f.push(vec![rename("a.txt", "b.txt")]).await;
+        assert_eq!((r.moved, r.uploaded, r.deleted), (0, 1, 1));
+        assert!(r.retry.is_empty());
+        // Not paired back into the move that just failed.
+        assert_eq!(
+            f.mock.calls(),
+            ["move a.txt -> b.txt", "copy b.txt", "delete a.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn giving_up_on_a_rename_lasts_through_a_failed_upload() {
+        let f = renamed_on_disk();
+        f.mock.fail_with("move a.txt -> b.txt", bad_gateway());
+        f.mock.fail_with("copy b.txt", transient());
+        f.mock.fail_with("delete a.txt", transient());
+        past_the_deadline(&f);
+        let r = f.push(vec![rename("a.txt", "b.txt")]).await;
+        assert_eq!(r.retry, [dirty("b.txt"), dirty("a.txt")]);
+
+        // The retry carries on as an upload and a delete, without moving.
+        f.mock.fail.lock().unwrap().clear();
+        let r = f.push(r.retry).await;
+        assert_eq!((r.moved, r.uploaded, r.deleted), (0, 1, 1));
+        let moves = f
+            .mock
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("move"))
+            .count();
+        assert_eq!(moves, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_server_never_makes_a_rename_give_up() {
+        let f = renamed_on_disk();
+        f.mock.fail_with("move a.txt -> b.txt", transient());
+        past_the_deadline(&f);
+        let r = f.push(vec![rename("a.txt", "b.txt")]).await;
+        assert_eq!(r.retry, [rename("a.txt", "b.txt")]);
+        assert_eq!(f.mock.calls(), ["move a.txt -> b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_rename_that_succeeds_in_the_end_is_still_a_move() {
+        let f = renamed_on_disk();
+        f.mock.fail_with("move a.txt -> b.txt", bad_gateway());
+        let r = f.push(vec![rename("a.txt", "b.txt")]).await;
+
+        f.mock.fail.lock().unwrap().clear();
+        let r = f.push(r.retry).await;
+        assert_eq!(r.moved, 1);
+        assert!(f.state.lock().unwrap().rename_failing.is_empty());
     }
 
     #[tokio::test]

@@ -37,6 +37,10 @@ that talks to a private `rclone rcd` over rclone's remote-control API:
   withheld from pushing and left to the pull, whose `maxDelete` check judges
   it. A bisync that locks itself out after a critical error is *not* resynced
   automatically; the daemon reports it and waits for you.
+- **Stuck locks.** A lock file that stops pulls is reported as the state `locked`
+  in `ctl status`, and in `systemctl status`, because the service itself stays
+  healthy (and keeps pushing). An empty lock older than `maxLock` is removed
+  automatically: rclone would otherwise honour it forever.
 
 Inspect or nudge a running pair with the `rclone-remotes` command the module
 installs (run as the pair's user, or root):
@@ -217,7 +221,9 @@ only saw half of (`mkdir new && mv old new/`).
 A move made in the vault is carried to the remote *before* the next pull as a
 server-side move; if the remote cannot be reached the pull waits and the rename
 is retried (and survives a restart), rather than being replayed as delete +
-create. `syncDeletions` runs after move tracking, so only genuine deletions
+create. A remote that can be reached but keeps failing the rename, for example
+with a 502, gets 30 minutes; after that the file is uploaded under its new name
+and the old one deleted, which on Google Drive makes it a new document. `syncDeletions` runs after move tracking, so only genuine deletions
 reach it, and an empty or unmounted side is never propagated.
 
 ## Google Drive integration
@@ -334,6 +340,29 @@ can stay as it is. Prefer `pathOverride` where it applies: real checksums are
 what let bisync tell a genuine change from a file that merely has the same size
 and a rewritten modtime.
 
+## WebDAV remotes behind a proxy
+
+Renames are pushed as WebDAV `MOVE`, which names its target in a `Destination`
+header. Apache's `mod_dav` (behind Synology's WebDAV Server, among others) rejects
+one whose scheme or port differs from what it was reached on, so through a proxy
+that terminates TLS every rename fails with `502 Bad Gateway`:
+
+```
+Destination URI refers to different scheme or port (https://hostname:443)
+(want: http://hostname:5005)
+```
+
+The daemon retries a rename the server rejects like this, then after 30 minutes
+gives up and uploads the file under its new name and deletes the old one. The
+file arrives, but a rename costs a full upload and a 30-minute wait. Fix it at
+the proxy, by rewriting the header to match the backend. In nginx:
+
+```nginx
+set $destination $http_destination;
+if ($destination ~ ^https://(.*)$) { set $destination http://$1; }
+proxy_set_header Destination $destination;
+```
+
 ## Excluding paths
 
 `excludes` is a list of rclone `--exclude` patterns, applied to both mounts and
@@ -380,7 +409,7 @@ stops it syncing but does not remove a copy an earlier run already made.
 | `remote` | string | — | Rclone remote path (e.g. `myremote:path`) |
 | `localPath` | string | — | Local mount point |
 | `configFile` | string or null | global default | Rclone config file path (`null` = rclone's default) |
-| `uid` | int | global default | UID for the FUSE mount |
+| `uid` | int | global default | UID reported as the owner of every file. Must match `user` (other than root), or the trash and git fail; checked at evaluation when `users.users.<user>.uid` is set |
 | `gid` | int | global default | GID for the FUSE mount |
 | `user` | string | global default | Owner for tmpfiles rule |
 | `group` | string | global default | Group for tmpfiles rule |
@@ -414,7 +443,7 @@ stops it syncing but does not remove a copy an earlier run already made.
 | `conflict.loser` | enum | `"delete"` | What happens to the losing copy: `num`, `pathname` or `delete` |
 | `compare` | string | `"size,modtime,checksum"` | How two files are judged equal |
 | `resilient` / `recover` / `createEmptySrcDirs` | bool | `true` | The matching bisync options |
-| `maxLock` | string | `"5m"` | How long a crashed run's lock is honoured |
+| `maxLock` | string | `"5m"` | How long a crashed run's lock is honoured; an empty lock older than this is removed by the daemon, since rclone would honour it forever |
 | `maxDelete` | null or 0–100 | `null` | Abort if more than this percent would be deleted (null = rclone's 50) |
 | `extraParams` | attrs | `{}` | Extra parameters for rclone's `sync/bisync`, merged over the above |
 | `settle.enable` | bool | `true` | Run a second pass after a pull and after pushed changes, to reconcile remotes that rewrite modtimes after upload (see Google Drive above); turn off for SFTP/WebDAV/local |
