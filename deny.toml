@@ -1,5 +1,11 @@
 [advisories]
 version = 2
+ignore = [
+  # chrono is unmaintained (no fixed release exists), and reaches this tree
+  # only through rclone-sdk, which pins it. Nothing here calls chrono directly.
+  # Drop this entry once a rclone-sdk release no longer depends on chrono.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono, no safe upgrade; transitive via rclone-sdk" },
+]
 
 [licenses]
 version = 2
