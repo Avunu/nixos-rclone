@@ -10,7 +10,7 @@ updates:
     schedule:
       interval: daily
     commit-message:
-      prefix: chore
+      prefix: fix(deps)
     groups:
       nix:
         patterns: ["*"]
@@ -39,7 +39,7 @@ updates:
       default-days: 5
       semver-major-days: 14
     commit-message:
-      prefix: chore
+      prefix: fix(deps)
     groups:
       carta:
         patterns: ["carta", "carta-*"]
@@ -56,7 +56,7 @@ updates:
       exclude:
         - Avunu/site-docs
     commit-message:
-      prefix: chore
+      prefix: fix(deps)
     groups:
       actions:
         patterns: ["*"]
