@@ -53,7 +53,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -64,7 +64,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -126,9 +126,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carta"
-version = "0.0.13"
+version = "0.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af498875fbd82631bdb2d0d428dd0295ea14eb997a5be33e470a0ce6d5a56f4f"
+checksum = "286e119d89f7d12da0c65defbfd76c00d254b56b38660adca8ca1edc3a8f837a"
 dependencies = [
  "carta-ast",
  "carta-core",
@@ -139,9 +139,9 @@ dependencies = [
 
 [[package]]
 name = "carta-ast"
-version = "0.0.13"
+version = "0.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c4eef5d8289219db569d7714b6816a989a7c6e04cf7d73f3eec1dd80b83693c"
+checksum = "a2a38c244754656aed9659df4b0da0026c07c1f21945d0b11b9e87bd9141c9a6"
 dependencies = [
  "compact_str",
  "stacker",
@@ -150,9 +150,9 @@ dependencies = [
 
 [[package]]
 name = "carta-core"
-version = "0.0.13"
+version = "0.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55281028ff00f0d9dd0cfd805127352e1797d857f5fdec9b4ce95ba627752b61"
+checksum = "eca8537c994b02e2f764056c1214b6c02fad985fb52ffd021eab4ab56de370b9"
 dependencies = [
  "carta-ast",
  "miniz_oxide",
@@ -162,9 +162,9 @@ dependencies = [
 
 [[package]]
 name = "carta-readers"
-version = "0.0.13"
+version = "0.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b58f57f23ba2903a1877998af2995a9150347574caf8d9e5352d65b71f92b64d"
+checksum = "62c7981c631a6d6d7df4e4dbe67c9e7c1224b1067e5db7fe010c49f5b11b5410"
 dependencies = [
  "carta-ast",
  "carta-core",
@@ -176,9 +176,9 @@ dependencies = [
 
 [[package]]
 name = "carta-writers"
-version = "0.0.13"
+version = "0.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b36c8c57a426d3dd5c3de1d7d862774cbf3b35b0b238019bec57bf400671bd"
+checksum = "0d48a184fd865c17d4ba694200928bfea61c5c234b2863d51ed7242831861450"
 dependencies = [
  "carta-ast",
  "carta-core",
@@ -308,7 +308,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1014,7 +1014,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1146,7 +1146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1165,7 +1165,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1232,7 +1232,7 @@ dependencies = [
  "getrandom",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1568,7 +1568,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
