@@ -49,10 +49,10 @@ impl Rc {
     }
 
     pub async fn version(&self) -> Result<String> {
-        let body: types::CoreVersionRequest = serde_json::from_value(json!({}))?;
+        let body: types::RcGlobalOptions = serde_json::from_value(json!({}))?;
         let resp = self
             .client
-            .core_version(None, None, None, &body)
+            .core_version(&body)
             .await
             .map_err(|e| anyhow!("core/version: {e}"))?;
         Ok(resp.into_inner().version)
@@ -62,7 +62,7 @@ impl Rc {
     pub async fn submit(&self, path: &str, params: &Value) -> Result<i64> {
         let resp = self
             .client
-            .post_async(path, &[], params)
+            .post_async(path, params)
             .await
             .map_err(|e| anyhow!("submitting {path}: {e}"))?;
         Ok(resp.into_inner().jobid)
@@ -73,12 +73,12 @@ impl Rc {
         // The id goes in the body, as a JSON number, and not in the query: the
         // SDK formats its `f64` query argument as "3.0", which rclone refuses
         // to parse as an int64. rclone lets the body override the query.
-        let body: types::JobStatusRequest = serde_json::from_value(json!({ "jobid": id }))?;
+        let body: types::JobStatusBody = serde_json::from_value(json!({ "jobid": id }))?;
         let mut delay = Duration::from_millis(50);
         loop {
             let st = self
                 .client
-                .job_status(None, None, None, &body)
+                .job_status(&body)
                 .await
                 .map_err(|e| anyhow!("job/status {id}: {e}"))?
                 .into_inner();
